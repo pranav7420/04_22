@@ -1,0 +1,268 @@
+CREATE OR REPLACE PROCEDURE `spdb`.`SP_GET_SLEEPY_CELL_DATA_SPDB_4G_5G`(IN_FLOW_TYPE varchar(20) CHARACTER SET utf8 COLLATE utf8_general_ci NULL, IN_GNODEB varchar(50) CHARACTER SET utf8 COLLATE utf8_general_ci NULL, IN_DU int(11) NULL, IN_MARKET_CSV text CHARACTER SET utf8 COLLATE utf8_general_ci NULL, IN_GEOFENCE_NODE_CSV longtext CHARACTER SET utf8 COLLATE utf8_general_ci NULL, IN_START_DATE datetime NULL, IN_END_DATE datetime NULL, IN_SEVERITY varchar(10) CHARACTER SET utf8 COLLATE utf8_general_ci NULL) RETURNS void DEFINER = 'spdb_admin'@'%' AS
+DECLARE
+    V_FLOW_TYPE VARCHAR(20);
+BEGIN
+    V_FLOW_TYPE = LOWER(IFNULL(NULLIF(TRIM(IN_FLOW_TYPE), ''), 'event'));
+
+    /* =========================================================
+       FLOW 1 : EVENT
+       - default flow if type is missing
+       - if DU is null -> 4G
+       - if DU is not null -> 5G
+       ========================================================= */
+    IF V_FLOW_TYPE = 'event' THEN
+
+        IF IN_DU IS NULL THEN
+            ECHO
+            SELECT
+                t.ENODEB_SECTOR_CARRIER,
+                NULL AS ENODEB_DU_SECTOR_CARRIER,
+                t.MARKET_ID,
+                t.STARTDATE,
+                t.GNODEB,
+                NULL AS DU,
+                t.SECTOR,
+                t.CARRIER,
+                t.TECHNOLOGY,
+                t.VENDOR,
+                t.SITE_NAME,
+                t.SITE_TYPE,
+                t.BAND_CLASS,
+                t.FREQUENCY_BAND,
+                t.AFFECTED_KPI,
+                t.HRS_AFFECTED,
+                t.SC_CONSECUTIVE_DURATION,
+                t.SLEPPYCELL_OCCUR_D,
+                t.WoW_TREND,
+                t.`30D_VOLUME_AVERAGE` AS `30D_VOLUME_AVERAGE`,
+                t.SEVERITY,
+                t.TICKET_ID,
+                t.TICKET_CLOSE_STATUS
+            FROM V_F_SLEEPY_CELL_4G_H t
+            WHERE t.GNODEB = IN_GNODEB
+              AND t.STARTDATE >= IN_START_DATE
+              AND t.STARTDATE < DATE_ADD(IN_END_DATE, INTERVAL 1 DAY)
+              AND t.SLEEPY_CELL_KAFKA_FLAG = 'Y'
+              AND t.SLEEPY_CELLS_FINAL_FLAG = 'Y'
+              AND (t.SEVERITY = IN_SEVERITY OR IN_SEVERITY IS NULL)
+            ORDER BY t.STARTDATE;
+
+        ELSE
+            ECHO
+            SELECT
+                NULL AS ENODEB_SECTOR_CARRIER,
+                t.ENODEB_DU_SECTOR_CARRIER,
+                t.MARKET_ID,
+                t.STARTDATE,
+                t.GNODEB,
+                t.DU,
+                t.SECTOR,
+                t.CARRIER,
+                t.TECHNOLOGY,
+                t.VENDOR,
+                t.SITE_NAME,
+                t.SITE_TYPE,
+                t.BAND_CLASS,
+                t.FREQUENCY_BAND,
+                t.AFFECTED_KPI,
+                t.HRS_AFFECTED,
+                t.SC_CONSECUTIVE_DURATION,
+                t.SLEPPYCELL_OCCUR_D,
+                t.WoW_TREND,
+                t.`30D_VOLUME_AVERAGE` AS `30D_VOLUME_AVERAGE`,
+                t.SEVERITY,
+                t.TICKET_ID,
+                t.TICKET_CLOSE_STATUS
+            FROM V_F_SLEEPY_CELL_5G_H t
+            WHERE t.GNODEB = IN_GNODEB
+              AND t.DU = IN_DU
+              AND t.STARTDATE >= IN_START_DATE
+              AND t.STARTDATE < DATE_ADD(IN_END_DATE, INTERVAL 1 DAY)
+              AND t.SLEEPY_CELLS_FINAL_FLAG = 'Y'
+              AND (t.SEVERITY = IN_SEVERITY OR IN_SEVERITY IS NULL)
+            ORDER BY t.STARTDATE;
+        END IF;
+
+    /* =========================================================
+       FLOW 2 : MARKET
+       - return both 4G and 5G rows for matching markets
+       ========================================================= */
+    ELSIF V_FLOW_TYPE = 'market' THEN
+
+        ECHO
+        SELECT *
+        FROM (
+            SELECT
+                t.ENODEB_SECTOR_CARRIER,
+                NULL AS ENODEB_DU_SECTOR_CARRIER,
+                t.MARKET_ID,
+                t.STARTDATE,
+                t.GNODEB,
+                NULL AS DU,
+                t.SECTOR,
+                t.CARRIER,
+                t.TECHNOLOGY,
+                t.VENDOR,
+                t.SITE_NAME,
+                t.SITE_TYPE,
+                t.BAND_CLASS,
+                t.FREQUENCY_BAND,
+                t.AFFECTED_KPI,
+                t.HRS_AFFECTED,
+                t.SC_CONSECUTIVE_DURATION,
+                t.SLEPPYCELL_OCCUR_D,
+                t.WoW_TREND,
+                t.`30D_VOLUME_AVERAGE` AS `30D_VOLUME_AVERAGE`,
+                t.SEVERITY,
+                t.TICKET_ID,
+                t.TICKET_CLOSE_STATUS
+            FROM V_F_SLEEPY_CELL_4G_H t
+            WHERE LOCATE(CONCAT(',', CAST(t.MARKET_ID AS CHAR), ','), CONCAT(',', IN_MARKET_CSV, ',')) > 0
+              AND t.STARTDATE >= IN_START_DATE
+              AND t.STARTDATE < DATE_ADD(IN_END_DATE, INTERVAL 1 DAY)
+              AND t.SLEEPY_CELL_KAFKA_FLAG = 'Y'
+              AND t.SLEEPY_CELLS_FINAL_FLAG = 'Y'
+              AND (t.SEVERITY = IN_SEVERITY OR IN_SEVERITY IS NULL)
+
+            UNION ALL
+
+            SELECT
+                NULL AS ENODEB_SECTOR_CARRIER,
+                t.ENODEB_DU_SECTOR_CARRIER,
+                t.MARKET_ID,
+                t.STARTDATE,
+                t.GNODEB,
+                t.DU,
+                t.SECTOR,
+                t.CARRIER,
+                t.TECHNOLOGY,
+                t.VENDOR,
+                t.SITE_NAME,
+                t.SITE_TYPE,
+                t.BAND_CLASS,
+                t.FREQUENCY_BAND,
+                t.AFFECTED_KPI,
+                t.HRS_AFFECTED,
+                t.SC_CONSECUTIVE_DURATION,
+                t.SLEPPYCELL_OCCUR_D,
+                t.WoW_TREND,
+                t.`30D_VOLUME_AVERAGE` AS `30D_VOLUME_AVERAGE`,
+                t.SEVERITY,
+                t.TICKET_ID,
+                t.TICKET_CLOSE_STATUS
+            FROM V_F_SLEEPY_CELL_5G_H t
+            WHERE LOCATE(CONCAT(',', CAST(t.MARKET_ID AS CHAR), ','), CONCAT(',', IN_MARKET_CSV, ',')) > 0
+              AND t.STARTDATE >= IN_START_DATE
+              AND t.STARTDATE < DATE_ADD(IN_END_DATE, INTERVAL 1 DAY)
+              AND t.SLEEPY_CELLS_FINAL_FLAG = 'Y'
+              AND (t.SEVERITY = IN_SEVERITY OR IN_SEVERITY IS NULL)
+        ) x
+        ORDER BY x.STARTDATE;
+
+    /* =========================================================
+       FLOW 3 : GEOFENCE
+       - nodeID payload contains only GNODEB values
+       - fetch from BOTH 4G and 5G tables
+       ========================================================= */
+    ELSIF V_FLOW_TYPE = 'geofence' THEN
+
+        ECHO
+        SELECT *
+        FROM (
+            SELECT
+                t.ENODEB_SECTOR_CARRIER,
+                NULL AS ENODEB_DU_SECTOR_CARRIER,
+                t.MARKET_ID,
+                t.STARTDATE,
+                t.GNODEB,
+                NULL AS DU,
+                t.SECTOR,
+                t.CARRIER,
+                t.TECHNOLOGY,
+                t.VENDOR,
+                t.SITE_NAME,
+                t.SITE_TYPE,
+                t.BAND_CLASS,
+                t.FREQUENCY_BAND,
+                t.AFFECTED_KPI,
+                t.HRS_AFFECTED,
+                t.SC_CONSECUTIVE_DURATION,
+                t.SLEPPYCELL_OCCUR_D,
+                t.WoW_TREND,
+                t.`30D_VOLUME_AVERAGE` AS `30D_VOLUME_AVERAGE`,
+                t.SEVERITY,
+                t.TICKET_ID,
+                t.TICKET_CLOSE_STATUS
+            FROM V_F_SLEEPY_CELL_4G_H t
+            WHERE LOCATE(CONCAT(',', t.GNODEB, ','), CONCAT(',', IN_GEOFENCE_NODE_CSV, ',')) > 0
+              AND t.STARTDATE >= IN_START_DATE
+              AND t.STARTDATE < DATE_ADD(IN_END_DATE, INTERVAL 1 DAY)
+              AND t.SLEEPY_CELL_KAFKA_FLAG = 'Y'
+              AND t.SLEEPY_CELLS_FINAL_FLAG = 'Y'
+              AND (t.SEVERITY = IN_SEVERITY OR IN_SEVERITY IS NULL)
+
+            UNION ALL
+
+            SELECT
+                NULL AS ENODEB_SECTOR_CARRIER,
+                t.ENODEB_DU_SECTOR_CARRIER,
+                t.MARKET_ID,
+                t.STARTDATE,
+                t.GNODEB,
+                t.DU,
+                t.SECTOR,
+                t.CARRIER,
+                t.TECHNOLOGY,
+                t.VENDOR,
+                t.SITE_NAME,
+                t.SITE_TYPE,
+                t.BAND_CLASS,
+                t.FREQUENCY_BAND,
+                t.AFFECTED_KPI,
+                t.HRS_AFFECTED,
+                t.SC_CONSECUTIVE_DURATION,
+                t.SLEPPYCELL_OCCUR_D,
+                t.WoW_TREND,
+                t.`30D_VOLUME_AVERAGE` AS `30D_VOLUME_AVERAGE`,
+                t.SEVERITY,
+                t.TICKET_ID,
+                t.TICKET_CLOSE_STATUS
+            FROM V_F_SLEEPY_CELL_5G_H t
+            WHERE LOCATE(CONCAT(',', t.GNODEB, ','), CONCAT(',', IN_GEOFENCE_NODE_CSV, ',')) > 0
+              AND t.STARTDATE >= IN_START_DATE
+              AND t.STARTDATE < DATE_ADD(IN_END_DATE, INTERVAL 1 DAY)
+              AND t.SLEEPY_CELLS_FINAL_FLAG = 'Y'
+              AND (t.SEVERITY = IN_SEVERITY OR IN_SEVERITY IS NULL)
+        ) x
+        ORDER BY x.STARTDATE;
+
+    ELSE
+        ECHO
+        SELECT
+            NULL AS ENODEB_SECTOR_CARRIER,
+            NULL AS ENODEB_DU_SECTOR_CARRIER,
+            NULL AS MARKET_ID,
+            NULL AS STARTDATE,
+            NULL AS GNODEB,
+            NULL AS DU,
+            NULL AS SECTOR,
+            NULL AS CARRIER,
+            NULL AS TECHNOLOGY,
+            NULL AS VENDOR,
+            NULL AS SITE_NAME,
+            NULL AS SITE_TYPE,
+            NULL AS BAND_CLASS,
+            NULL AS FREQUENCY_BAND,
+            NULL AS AFFECTED_KPI,
+            NULL AS HRS_AFFECTED,
+            NULL AS SC_CONSECUTIVE_DURATION,
+            NULL AS SLEPPYCELL_OCCUR_D,
+            NULL AS WoW_TREND,
+            NULL AS `30D_VOLUME_AVERAGE`,
+            NULL AS SEVERITY,
+            NULL AS TICKET_ID,
+            NULL AS TICKET_CLOSE_STATUS
+            FROM ( SELECT 1 AS DUMMY_COL ) x
+        WHERE 1 = 0;
+    END IF;
+END;
