@@ -1,0 +1,61 @@
+So here the thing is earlier there was only 2 tables like :
+F_SLEEPY_CELL_5G_H and F_SLEEPY_CELL_4G_H
+
+But these tables were split based on market.
+So they broke down to below distinct tables:
+F_SLEEPY_CELL_MINKY_4G_H
+F_SLEEPY_CELL_OHPA_4G_H
+F_SLEEPY_CELL_HGC_4G_H
+F_SLEEPY_CELL_SW_4G_H
+F_SLEEPY_CELL_GAAL_4G_H
+F_SLEEPY_CELL_CARTN_4G_H
+F_SLEEPY_CELL_NYM_4G_H
+F_SLEEPY_CELL_PNW_4G_H
+F_SLEEPY_CELL_FLORIDA_4G_H
+F_SLEEPY_CELL_SOCAL_4G_H
+F_SLEEPY_CELL_NORCAL_4G_H
+F_SLEEPY_CELL_MTN_4G_H
+F_SLEEPY_CELL_NE_4G_H
+F_SLEEPY_CELL_CTX_4G_H
+F_SLEEPY_CELL_ILWI_4G_H
+F_SLEEPY_CELL_WBV_4G_H
+F_SLEEPY_CELL_KSMO_4G_H
+F_SLEEPY_CELL_PTS_4G_H
+F_SLEEPY_CELL_GP_4G_H
+F_SLEEPY_CELL_UPNY_4G_H
+
+and same way for 5G.
+
+Thats why we had to create the views like V_F_SLEEPY_CELL_4G_H and V_F_SLEEPY_CELL_5G_H by unioning above tables. But draw back here is, its slowing down performance.
+
+So now we are thinking if there could be a way to dynamically query the table based on enodeb coming.
+
+
+select distinct submarket_code from tblSITE_ZITE a, SPDB_NOTIFICATION_CONFIG b
+where a.mkt_id = b.market
+This query results are below :
+MINKY
+OHPA
+HGC
+SW
+GAAL
+CARTN
+NYM
+PNW
+FLORIDA
+SOCAL
+NORCAL
+MTN
+NE
+CTX
+ILWI
+WBV
+KSMO
+PTS
+GP
+UPNY
+
+select distinct submarket_code from tblSITE_ZITE a, SPDB_NOTIFICATION_CONFIG b
+where a.mkt_id = b.market and enodeb = '0000003'
+This query result is "PNW"
+So can we use this query and plug in which table needs to be queried ?
