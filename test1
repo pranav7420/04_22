@@ -1,0 +1,569 @@
+Got it. I’ll keep Samsung **lean like Ericsson** and stop at these 3 items for now:
+
+* **Hourly table**
+* **Daily table**
+* **Hourly SP**
+
+I used the Samsung rules sheet as the source of truth for the KPI set:
+
+* `CellUnavailableTimeDown`
+* `CellUnavailableTimeLock`
+* `unplanned_downtime = Down - Lock`
+* `SEA_DataERABDropRate%`
+* `SEA_DataERABDropRate_num`
+* `SEA_DataERABDropRate_den`
+* `Samsung_Outage_State` 
+
+And I used the Ericsson hourly SP/table as the template pattern:
+
+* market resolution
+* rules-driven formula fetch from `SPDB_RULES`
+* hourly aggregation from raw KPI tables
+* insert into a lean hourly fact table with duplicate-key upsert.  
+
+## Important assumption I made
+
+The Samsung rule sheet does **not** give the exact raw physical table names, only KPI family names like:
+
+* `S_RRU`
+* `S_ERAB_REL_ENB_PER_QCI`
+* `S_ERAB_REL_MME_PER_QCI`
+* `S_ERAB_REL_ENB_PER_QCI_1`
+* `S_ERAB_REL_MME_PER_QCI_3` 
+
+So in the SP below I used the most likely raw table names:
+
+* `S_RRU_R`
+* `S_ERAB_REL_ENB_PER_QCI_R`
+* `S_ERAB_REL_MME_PER_QCI_R`
+* `S_ERAB_REL_ENB_PER_QCI_1_R`
+* `S_ERAB_REL_MME_PER_QCI_3_R`
+
+If your actual environment uses slightly different raw table names, only those FROM clauses will need adjustment. The rest of the logic stays the same.
+
+Also, for `Samsung_Outage_State`, the sheet says:
+“Need to calculate from 15 Mins. (unplanned_downtime <900 , then 1)” 
+
+That rule is incomplete as written, because `0 < 900` would make every clean interval count as outage. So I used the safer interpretation:
+
+```sql
+CASE WHEN unplanned_downtime > 0 AND unplanned_downtime < 900 THEN 1 ELSE 0 END
+```
+
+That is the only business-rule interpretation I had to tighten.
+
+---
+
+# 1) Hourly table
+
+```sql
+CREATE TABLE `F_MICRO_OUTAGE_SAMSUNG_4G_H` (
+  `ENODEB_SECTOR_CARRIER` varchar(50) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'Concatenated Unique ID',
+  `STARTDATE` date DEFAULT NULL COMMENT 'Day of the outage',
+  `HR` int(2) DEFAULT NULL COMMENT 'Hour of the outage',
+  `TECHNOLOGY` varchar(20) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'Network Technology',
+  `REGION` varchar(50) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'Geographic region',
+  `MARKET_ID` varchar(3) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'Contains Market Code',
+  `MARKET_DESC` varchar(100) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'Full description of the market',
+  `SITE_NAME` varchar(255) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'Site name',
+  `GNODEB` varchar(50) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'eNodeB / gNodeB ID or name',
+  `SECTOR` int(11) DEFAULT NULL COMMENT 'Sector identifier',
+  `CARRIER` int(11) DEFAULT NULL COMMENT 'Carrier/Frequency identifier',
+  `CELLUNAVAILABLETIMEDOWN` decimal(18,4) DEFAULT NULL COMMENT 'Samsung 15-min CellUnavailableTimeDown aggregated to hour',
+  `CELLUNAVAILABLETIMELOCK` decimal(18,4) DEFAULT NULL COMMENT 'Samsung 15-min CellUnavailableTimeLock aggregated to hour',
+  `UNPLANNED_DOWNTIME` decimal(18,4) DEFAULT NULL COMMENT 'CellUnavailableTimeDown - CellUnavailableTimeLock',
+  `SEA_DataERABDropRate_%` decimal(10,4) DEFAULT NULL COMMENT 'Samsung 4G drop percentage',
+  `SEA_DataERABDropRate_NUM` decimal(18,4) DEFAULT NULL COMMENT 'Samsung 4G drop numerator',
+  `SEA_DataERABDropRate_DEN` decimal(18,4) DEFAULT NULL COMMENT 'Samsung 4G drop denominator',
+  `SAMSUNG_OUTAGE_STATE` int(11) DEFAULT NULL COMMENT 'Hourly sum of 15-min outage-state flags',
+  UNIQUE KEY `UNQ_OUTAGE` (`ENODEB_SECTOR_CARRIER`,`STARTDATE`,`HR`) USING HASH,
+  SHARD KEY `SHRD_OUTAGE` (`ENODEB_SECTOR_CARRIER`,`STARTDATE`),
+  SORT KEY `SRT_OUTAGE` (`STARTDATE`,`MARKET_ID`),
+  KEY `idx_filter` (`STARTDATE`,`MARKET_ID`) USING HASH
+) COMMENT='Table tracking granular hourly Samsung 4G network micro-outages'
+AUTOSTATS_CARDINALITY_MODE=OFF
+AUTOSTATS_HISTOGRAM_MODE=OFF
+AUTOSTATS_SAMPLING=OFF
+SQL_MODE='PIPES_AS_CONCAT,ONLY_FULL_GROUP_BY,STRICT_ALL_TABLES';
+```
+
+This stays lean like Ericsson, just with the Samsung KPI columns instead of Ericsson bearer-drop columns.  
+
+---
+
+# 2) Daily table
+
+I kept this lean too, but I am **not** carrying `HR` into the daily table. That was one of the weak spots in the Ericsson design.
+
+```sql
+CREATE TABLE `F_MICRO_OUTAGE_SAMSUNG_4G_D` (
+  `ENODEB_SECTOR_CARRIER` varchar(50) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'Concatenated Unique ID',
+  `STARTDATE` date DEFAULT NULL COMMENT 'Day of the outage',
+  `TECHNOLOGY` varchar(20) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'Network Technology',
+  `REGION` varchar(50) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'Geographic region',
+  `MARKET_ID` varchar(3) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'Contains Market Code',
+  `MARKET_DESC` varchar(100) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'Full description of the market',
+  `SITE_NAME` varchar(255) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'Site name',
+  `GNODEB` varchar(50) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'eNodeB / gNodeB ID or name',
+  `SECTOR` int(11) DEFAULT NULL COMMENT 'Sector identifier',
+  `CARRIER` int(11) DEFAULT NULL COMMENT 'Carrier/Frequency identifier',
+  `CELLUNAVAILABLETIMEDOWN` decimal(18,4) DEFAULT NULL COMMENT 'Daily sum of hourly CellUnavailableTimeDown',
+  `CELLUNAVAILABLETIMELOCK` decimal(18,4) DEFAULT NULL COMMENT 'Daily sum of hourly CellUnavailableTimeLock',
+  `UNPLANNED_DOWNTIME` decimal(18,4) DEFAULT NULL COMMENT 'Daily sum of unplanned downtime',
+  `SEA_DataERABDropRate_%` decimal(10,4) DEFAULT NULL COMMENT 'Daily Samsung 4G drop percentage',
+  `SEA_DataERABDropRate_NUM` decimal(18,4) DEFAULT NULL COMMENT 'Daily Samsung 4G drop numerator',
+  `SEA_DataERABDropRate_DEN` decimal(18,4) DEFAULT NULL COMMENT 'Daily Samsung 4G drop denominator',
+  `SAMSUNG_OUTAGE_STATE` int(11) DEFAULT NULL COMMENT 'Daily outage-state total',
+  `BEAR_DROP_TO_OUTAGE_CORRELATION` varchar(30) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'Correlation between outage state and drop numerator',
+  `MICROOUTAGE_FLAG` varchar(3) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'Flag indicating MicroOutage',
+  `MICROOUTAGE_FINAL_FLAG` varchar(3) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'Final Flag indicating MicroOutage',
+  UNIQUE KEY `UNQ_OUTAGE` (`ENODEB_SECTOR_CARRIER`,`STARTDATE`) USING HASH,
+  SHARD KEY `SHRD_OUTAGE` (`ENODEB_SECTOR_CARRIER`,`STARTDATE`),
+  SORT KEY `SRT_OUTAGE` (`STARTDATE`,`MARKET_ID`),
+  KEY `idx_filter` (`STARTDATE`,`MARKET_ID`) USING HASH
+) COMMENT='Daily Samsung 4G MicroOutage fact table'
+AUTOSTATS_CARDINALITY_MODE=OFF
+AUTOSTATS_HISTOGRAM_MODE=OFF
+AUTOSTATS_SAMPLING=OFF
+SQL_MODE='PIPES_AS_CONCAT,ONLY_FULL_GROUP_BY,STRICT_ALL_TABLES';
+```
+
+The daily columns are based only on the Samsung rules plus the lean Ericsson daily pattern.  
+
+---
+
+# 3) Hourly SP
+
+This is the Samsung counterpart to the Ericsson hourly SP, but adapted to Samsung rules and columns.
+
+```sql
+CREATE OR REPLACE PROCEDURE `spdb`.`sp_insert_f_micro_outage_samsung_4G_H`(
+    p_start_date datetime NULL,
+    p_end_date datetime NULL,
+    p_market_ids varchar(500) CHARACTER SET utf8 COLLATE utf8_general_ci NULL
+)
+RETURNS void
+DEFINER = 'spdb_admin'@'%'
+AS
+DECLARE
+    v_calc_start datetime;
+    v_calc_end datetime;
+    vMarketId text;
+    v_sql TEXT;
+
+    -- Formula Variables
+    v_raw_num TEXT;
+    v_raw_den TEXT;
+    v_f_s_num TEXT;
+    v_f_s_den TEXT;
+
+    vRowcount bigint = 0;
+    vAppLogLevel varchar(100) CHARACTER SET utf8 COLLATE utf8_bin NULL;
+
+    -- Variables for logging
+    vActivityStartTime datetime(6);
+    vSessionIdentifier varchar(50);
+
+    -- Audit Log Record
+    vOmAuditLog RECORD (
+        spName varchar(256) CHARACTER SET utf8 COLLATE utf8_bin,
+        sqlExecuted text CHARACTER SET utf8 COLLATE utf8_bin,
+        sqlVariables text CHARACTER SET utf8 COLLATE utf8_bin,
+        logTime datetime,
+        errorCode int,
+        errorMsg text CHARACTER SET utf8 COLLATE utf8_bin
+    ) = row(null, null, null, null, null, null);
+
+BEGIN
+    vOmAuditLog.spName = 'sp_insert_f_micro_outage_samsung_4G_H';
+    vOmAuditLog.errorCode = 0;
+    vOmAuditLog.errorMsg = ' ';
+
+    vActivityStartTime = now(6);
+    vSessionIdentifier = uuid();
+
+    v_calc_start = COALESCE(p_start_date, DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY));
+    v_calc_end   = COALESCE(p_end_date, DATE_ADD(CURRENT_DATE(), INTERVAL 1 DAY));
+
+    -- Get Log Level
+    SELECT NVL(ANY_VALUE(KEY_VALUE), 'ERROR')
+      INTO vAppLogLevel
+      FROM APP_CONFIG
+     WHERE APP_NAME = vOmAuditLog.spName
+       AND APP_KEY  = 'APP_LOG_LEVEL';
+
+    IF vAppLogLevel IN ('ERROR', 'DEBUG') THEN
+
+        START TRANSACTION;
+
+        -- Market resolution
+        IF p_market_ids IS NOT NULL AND p_market_ids <> '' THEN
+            SELECT CONCAT("(", REPLACE(QUOTE(REPLACE(p_market_ids, ' ', '')), ',', "','"), ")")
+              INTO vMarketId;
+        ELSE
+            SELECT CONCAT('(', GROUP_CONCAT(QUOTE(MARKET)), ')')
+              INTO vMarketId
+              FROM SPDB_NOTIFICATION_CONFIG
+             WHERE notification_name = 'Micro_Outage'
+               AND is_enabled = 'Y';
+        END IF;
+
+        IF vMarketId IS NULL OR vMarketId = '()' THEN
+            vOmAuditLog.errorMsg = 'No outage for Samsung 4G markets found.';
+            CALL writeAuditLog(vOmAuditLog);
+            ROLLBACK;
+            RETURN;
+        END IF;
+
+        vOmAuditLog.sqlVariables = CONCAT(IFNULL(p_start_date,'NULL'), ',', IFNULL(p_end_date,'NULL'), ',', IFNULL(p_market_ids,'NULL'));
+        vOmAuditLog.sqlExecuted  = CONCAT('Starting Samsung 4G Hourly processing with params (', QUOTE(v_calc_start), ',', QUOTE(v_calc_end), ',', QUOTE(vMarketId), ');');
+        CALL writeAuditLog(vOmAuditLog);
+
+        -- Fetch formulas from SPDB_RULES
+        SELECT
+            MAX(CASE WHEN KPI_NAME = 'SEA_DataERABDropRate_num' THEN KPI_FORMULA END),
+            MAX(CASE WHEN KPI_NAME = 'SEA_DataERABDropRate_den' THEN KPI_FORMULA END)
+          INTO v_raw_num, v_raw_den
+          FROM SPDB_RULES
+         WHERE TECHNOLOGY = '4G'
+           AND VENDOR = 'Samsung'
+           AND IS_ACTIVE = 'Y';
+
+        -- Replace KPI source prefixes with SQL aliases
+        v_f_s_num = COALESCE(v_raw_num, '0');
+        v_f_s_num = REPLACE(v_f_s_num, 'S_ERAB_REL_ENB_PER_QCI:',   'a.');
+        v_f_s_num = REPLACE(v_f_s_num, 'S_ERAB_REL_MME_PER_QCI:',   'b.');
+        v_f_s_num = REPLACE(v_f_s_num, 'S_ERAB_REL_ENB_PER_QCI_1:', 'c.');
+        v_f_s_num = REPLACE(v_f_s_num, 'S_ERAB_REL_MME_PER_QCI_3:', 'd.');
+
+        v_f_s_den = COALESCE(v_raw_den, '0');
+        v_f_s_den = REPLACE(v_f_s_den, 'S_ERAB_REL_ENB_PER_QCI:',   'a.');
+        v_f_s_den = REPLACE(v_f_s_den, 'S_ERAB_REL_MME_PER_QCI:',   'b.');
+        v_f_s_den = REPLACE(v_f_s_den, 'S_ERAB_REL_ENB_PER_QCI_1:', 'c.');
+        v_f_s_den = REPLACE(v_f_s_den, 'S_ERAB_REL_MME_PER_QCI_3:', 'd.');
+
+        v_sql = CONCAT("
+        INSERT INTO F_MICRO_OUTAGE_SAMSUNG_4G_H (
+            ENODEB_SECTOR_CARRIER,
+            STARTDATE,
+            HR,
+            TECHNOLOGY,
+            REGION,
+            MARKET_ID,
+            MARKET_DESC,
+            SITE_NAME,
+            GNODEB,
+            SECTOR,
+            CARRIER,
+            CELLUNAVAILABLETIMEDOWN,
+            CELLUNAVAILABLETIMELOCK,
+            UNPLANNED_DOWNTIME,
+            `SEA_DataERABDropRate_%`,
+            `SEA_DataERABDropRate_NUM`,
+            `SEA_DataERABDropRate_DEN`,
+            SAMSUNG_OUTAGE_STATE
+        )
+        WITH Filtered_Cells AS (
+            SELECT
+                ENODEB_SECTOR_CARRIER,
+                ENODEB,
+                NETWORK_MARKET,
+                MKT_ID,
+                NETWORK_LOCAL_MARKET,
+                SITE_NAME,
+                SECTOR,
+                CARRIER
+            FROM tblSITE_ZITE
+            WHERE MKT_ID IN ", vMarketId, "
+        ),
+
+        CTE_RRU AS (
+            SELECT
+                cell_key,
+                DATE_TRUNC('hour', STARTDATE) AS kpi_hour,
+                COALESCE(SUM(CellUnavailableTimeDown), 0) AS CellUnavailableTimeDown,
+                COALESCE(SUM(CellUnavailableTimeLock), 0) AS CellUnavailableTimeLock,
+                COALESCE(SUM(CellUnavailableTimeDown - CellUnavailableTimeLock), 0) AS unplanned_downtime,
+                COALESCE(SUM(
+                    CASE
+                        WHEN (CellUnavailableTimeDown - CellUnavailableTimeLock) > 0
+                         AND (CellUnavailableTimeDown - CellUnavailableTimeLock) < 900
+                        THEN 1 ELSE 0
+                    END
+                ), 0) AS Samsung_Outage_State
+            FROM (
+                SELECT
+                    rru.*,
+                    sz.ENODEB_SECTOR_CARRIER AS cell_key,
+                    RANK() OVER (
+                        PARTITION BY rru.STARTDATE, rru.NETWORK_ELEMENT_ID
+                        ORDER BY rru.CREATED_DATE DESC
+                    ) AS rnk
+                FROM S_RRU_R rru
+                INNER JOIN E_NETWORK_ELEMENT ne
+                        ON ne.PK_ID = rru.NETWORK_ELEMENT_ID
+                INNER JOIN Filtered_Cells sz
+                        ON ne.ENODEB_ID = sz.ENODEB
+                WHERE rru.STARTDATE >= '", v_calc_start, "'
+                  AND rru.STARTDATE <= '", v_calc_end, "'
+                  AND ne.LTE_VZW_ID IN ", vMarketId, "
+            ) t
+            WHERE t.rnk = 1
+            GROUP BY 1, 2
+        ),
+
+        CTE_ENB_QCI AS (
+            SELECT
+                cell_key,
+                DATE_TRUNC('hour', STARTDATE) AS kpi_hour,
+                COALESCE(SUM(RELABNORMALBYENBQCI), 0)       AS RELABNORMALBYENBQCI,
+                COALESCE(SUM(RELNORMALBYENBQCI), 0)         AS RELNORMALBYENBQCI
+            FROM (
+                SELECT
+                    x.*,
+                    sz.ENODEB_SECTOR_CARRIER AS cell_key,
+                    RANK() OVER (
+                        PARTITION BY x.STARTDATE, x.NETWORK_ELEMENT_ID
+                        ORDER BY x.CREATED_DATE DESC
+                    ) AS rnk
+                FROM S_ERAB_REL_ENB_PER_QCI_R x
+                INNER JOIN E_NETWORK_ELEMENT ne
+                        ON ne.PK_ID = x.NETWORK_ELEMENT_ID
+                INNER JOIN Filtered_Cells sz
+                        ON ne.ENODEB_ID = sz.ENODEB
+                WHERE x.STARTDATE >= '", v_calc_start, "'
+                  AND x.STARTDATE <= '", v_calc_end, "'
+                  AND ne.LTE_VZW_ID IN ", vMarketId, "
+            ) t
+            WHERE t.rnk = 1
+            GROUP BY 1, 2
+        ),
+
+        CTE_MME_QCI AS (
+            SELECT
+                cell_key,
+                DATE_TRUNC('hour', STARTDATE) AS kpi_hour,
+                COALESCE(SUM(RELABNORMALBYMMEACTQCI), 0)    AS RELABNORMALBYMMEACTQCI,
+                COALESCE(SUM(RELABNORMALBYMMEQCI), 0)       AS RELABNORMALBYMMEQCI,
+                COALESCE(SUM(RELNORMALBYMMEQCI), 0)         AS RELNORMALBYMMEQCI
+            FROM (
+                SELECT
+                    x.*,
+                    sz.ENODEB_SECTOR_CARRIER AS cell_key,
+                    RANK() OVER (
+                        PARTITION BY x.STARTDATE, x.NETWORK_ELEMENT_ID
+                        ORDER BY x.CREATED_DATE DESC
+                    ) AS rnk
+                FROM S_ERAB_REL_MME_PER_QCI_R x
+                INNER JOIN E_NETWORK_ELEMENT ne
+                        ON ne.PK_ID = x.NETWORK_ELEMENT_ID
+                INNER JOIN Filtered_Cells sz
+                        ON ne.ENODEB_ID = sz.ENODEB
+                WHERE x.STARTDATE >= '", v_calc_start, "'
+                  AND x.STARTDATE <= '", v_calc_end, "'
+                  AND ne.LTE_VZW_ID IN ", vMarketId, "
+            ) t
+            WHERE t.rnk = 1
+            GROUP BY 1, 2
+        ),
+
+        CTE_ENB_QCI_1 AS (
+            SELECT
+                cell_key,
+                DATE_TRUNC('hour', STARTDATE) AS kpi_hour,
+                COALESCE(SUM(RELABNORMALBYENBQCI_QCI1), 0)  AS RELABNORMALBYENBQCI_QCI1,
+                COALESCE(SUM(RELNORMALBYENBQCI_QCI1), 0)    AS RELNORMALBYENBQCI_QCI1
+            FROM (
+                SELECT
+                    x.*,
+                    sz.ENODEB_SECTOR_CARRIER AS cell_key,
+                    RANK() OVER (
+                        PARTITION BY x.STARTDATE, x.NETWORK_ELEMENT_ID
+                        ORDER BY x.CREATED_DATE DESC
+                    ) AS rnk
+                FROM S_ERAB_REL_ENB_PER_QCI_1_R x
+                INNER JOIN E_NETWORK_ELEMENT ne
+                        ON ne.PK_ID = x.NETWORK_ELEMENT_ID
+                INNER JOIN Filtered_Cells sz
+                        ON ne.ENODEB_ID = sz.ENODEB
+                WHERE x.STARTDATE >= '", v_calc_start, "'
+                  AND x.STARTDATE <= '", v_calc_end, "'
+                  AND ne.LTE_VZW_ID IN ", vMarketId, "
+            ) t
+            WHERE t.rnk = 1
+            GROUP BY 1, 2
+        ),
+
+        CTE_MME_QCI_3 AS (
+            SELECT
+                cell_key,
+                DATE_TRUNC('hour', STARTDATE) AS kpi_hour,
+                COALESCE(SUM(RELABNRMLMMEACTQCI_QCI1), 0)   AS RELABNRMLMMEACTQCI_QCI1,
+                COALESCE(SUM(RELABNRMLMMEQCI_QCI1), 0)      AS RELABNRMLMMEQCI_QCI1,
+                COALESCE(SUM(RELNRMLMMEQCI_QCI1), 0)        AS RELNRMLMMEQCI_QCI1
+            FROM (
+                SELECT
+                    x.*,
+                    sz.ENODEB_SECTOR_CARRIER AS cell_key,
+                    RANK() OVER (
+                        PARTITION BY x.STARTDATE, x.NETWORK_ELEMENT_ID
+                        ORDER BY x.CREATED_DATE DESC
+                    ) AS rnk
+                FROM S_ERAB_REL_MME_PER_QCI_3_R x
+                INNER JOIN E_NETWORK_ELEMENT ne
+                        ON ne.PK_ID = x.NETWORK_ELEMENT_ID
+                INNER JOIN Filtered_Cells sz
+                        ON ne.ENODEB_ID = sz.ENODEB
+                WHERE x.STARTDATE >= '", v_calc_start, "'
+                  AND x.STARTDATE <= '", v_calc_end, "'
+                  AND ne.LTE_VZW_ID IN ", vMarketId, "
+            ) t
+            WHERE t.rnk = 1
+            GROUP BY 1, 2
+        )
+
+        SELECT
+            sz.ENODEB_SECTOR_CARRIER,
+            CAST(r.kpi_hour AS DATE) AS STARTDATE,
+            HOUR(r.kpi_hour) AS HR,
+            '4G' AS TECHNOLOGY,
+            sz.NETWORK_MARKET AS REGION,
+            sz.MKT_ID AS MARKET_ID,
+            sz.NETWORK_LOCAL_MARKET AS MARKET_DESC,
+            sz.SITE_NAME,
+            sz.ENODEB AS GNODEB,
+            sz.SECTOR,
+            sz.CARRIER,
+            COALESCE(r.CellUnavailableTimeDown, 0) AS CELLUNAVAILABLETIMEDOWN,
+            COALESCE(r.CellUnavailableTimeLock, 0) AS CELLUNAVAILABLETIMELOCK,
+            COALESCE(r.unplanned_downtime, 0) AS UNPLANNED_DOWNTIME,
+            (100.0 * (", v_f_s_num, ") / NULLIF((", v_f_s_den, "), 0)) AS `SEA_DataERABDropRate_%`,
+            (", v_f_s_num, ") AS `SEA_DataERABDropRate_NUM`,
+            (", v_f_s_den, ") AS `SEA_DataERABDropRate_DEN`,
+            COALESCE(r.Samsung_Outage_State, 0) AS SAMSUNG_OUTAGE_STATE
+        FROM Filtered_Cells sz
+        INNER JOIN CTE_RRU r
+                ON r.cell_key = sz.ENODEB_SECTOR_CARRIER
+        LEFT JOIN CTE_ENB_QCI a
+               ON a.cell_key = r.cell_key
+              AND a.kpi_hour = r.kpi_hour
+        LEFT JOIN CTE_MME_QCI b
+               ON b.cell_key = r.cell_key
+              AND b.kpi_hour = r.kpi_hour
+        LEFT JOIN CTE_ENB_QCI_1 c
+               ON c.cell_key = r.cell_key
+              AND c.kpi_hour = r.kpi_hour
+        LEFT JOIN CTE_MME_QCI_3 d
+               ON d.cell_key = r.cell_key
+              AND d.kpi_hour = r.kpi_hour
+        ON DUPLICATE KEY UPDATE
+            CELLUNAVAILABLETIMEDOWN  = VALUES(CELLUNAVAILABLETIMEDOWN),
+            CELLUNAVAILABLETIMELOCK  = VALUES(CELLUNAVAILABLETIMELOCK),
+            UNPLANNED_DOWNTIME       = VALUES(UNPLANNED_DOWNTIME),
+            `SEA_DataERABDropRate_%` = VALUES(`SEA_DataERABDropRate_%`),
+            `SEA_DataERABDropRate_NUM` = VALUES(`SEA_DataERABDropRate_NUM`),
+            `SEA_DataERABDropRate_DEN` = VALUES(`SEA_DataERABDropRate_DEN`),
+            SAMSUNG_OUTAGE_STATE     = VALUES(SAMSUNG_OUTAGE_STATE);
+        ");
+
+        IF vAppLogLevel = 'ERROR' THEN
+            EXECUTE IMMEDIATE v_sql;
+            vRowcount = row_count();
+            COMMIT;
+            vOmAuditLog.sqlExecuted = CONCAT('Status: Insert Success | Records: ', vRowcount);
+        ELSE
+            vRowcount = 0;
+            ROLLBACK;
+            vOmAuditLog.sqlExecuted = CONCAT('DEBUG MODE: SQL: \n', v_sql);
+        END IF;
+
+        CALL writeAuditLog(vOmAuditLog);
+
+        INSERT INTO APP_ACTIVITIES_LOG (
+            APP_NAME,
+            BATCH_ID,
+            ACTIVITY_TYPE,
+            ACTIVITY_DETAILS,
+            ACTIVITY_OUTPUT,
+            ACTIVITY_START_TS,
+            ACTIVITY_END_TS,
+            ACTIVITY_STATUS
+        ) VALUES (
+            vOmAuditLog.spName,
+            vSessionIdentifier,
+            'Micro outage Samsung Hourly 4G',
+            CASE WHEN vAppLogLevel = 'DEBUG' THEN CONCAT('SQL:\n', v_sql) ELSE vOmAuditLog.sqlVariables END,
+            CONCAT('Level: ', vAppLogLevel, ' | Records: ', vRowcount),
+            vActivityStartTime,
+            now(6),
+            'COMPLETE'
+        );
+
+        ECHO SELECT vOmAuditLog.spName AS APP_NAME, CONCAT('Records: ', vRowcount) AS STATUS, 'COMPLETE' AS REASON FROM DUAL;
+
+    END IF;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        ROLLBACK;
+        vOmAuditLog.errorMsg = exception_message();
+        vOmAuditLog.sqlExecuted = CONCAT('EXCEPTION: ', vOmAuditLog.errorMsg, ' | SQL: ', IFNULL(v_sql, 'NONE'));
+        CALL writeAuditLog(vOmAuditLog);
+        COMMIT;
+        RAISE;
+END;
+```
+
+---
+
+## What this hourly SP is doing
+
+It mirrors the Ericsson hourly pattern closely:
+
+* resolves enabled markets from `SPDB_NOTIFICATION_CONFIG`
+* reads Samsung formulas from `SPDB_RULES`
+* converts formula prefixes into SQL aliases
+* builds hourly KPI CTEs from Samsung raw sources
+* computes:
+
+  * `CELLUNAVAILABLETIMEDOWN`
+  * `CELLUNAVAILABLETIMELOCK`
+  * `UNPLANNED_DOWNTIME`
+  * `SEA_DataERABDropRate_%`
+  * `SEA_DataERABDropRate_NUM`
+  * `SEA_DataERABDropRate_DEN`
+  * `SAMSUNG_OUTAGE_STATE`
+* upserts the hourly table.  
+
+---
+
+## A couple of things I intentionally changed from Ericsson
+
+I kept the pattern, but I cleaned up two things:
+
+* **Daily table has no `HR`**
+* **Hourly duplicate update updates all Samsung KPI columns**, not just a few
+
+That makes this safer than a literal Ericsson clone.  
+
+---
+
+## What to verify in your DB before running this
+
+Just verify these object names exist exactly as expected:
+
+* `SPDB_RULES`
+* `SPDB_NOTIFICATION_CONFIG`
+* `APP_CONFIG`
+* `APP_ACTIVITIES_LOG`
+* `tblSITE_ZITE`
+* `E_NETWORK_ELEMENT`
+* `S_RRU_R`
+* `S_ERAB_REL_ENB_PER_QCI_R`
+* `S_ERAB_REL_MME_PER_QCI_R`
+* `S_ERAB_REL_ENB_PER_QCI_1_R`
+* `S_ERAB_REL_MME_PER_QCI_3_R`
+
+If the Samsung raw table names differ, I’ll patch only those sections next.
+
+Next, I can give you the **daily SP** using this exact table design.
