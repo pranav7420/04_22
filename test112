@@ -5,3 +5,8 @@ SELECT DISTINCT b.SUBMARKET_CODE
             ON a.mkt_id = b.market
          WHERE a.enodeb = IN_GNODEB
          LIMIT 1;
+
+
+V_SUBMARKET_CODE VARCHAR(50);
+    V_TABLE_NAME VARCHAR(200);
+    V_SQL LONGTEXT;
