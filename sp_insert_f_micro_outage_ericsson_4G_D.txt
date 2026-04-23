@@ -1,0 +1,254 @@
+CREATE OR REPLACE PROCEDURE `spdb`.`sp_insert_f_micro_outage_ericsson_4G_D`(p_start_date datetime NULL, p_end_date datetime NULL, p_market_ids varchar(500) CHARACTER SET utf8 COLLATE utf8_general_ci NULL) RETURNS void DEFINER = 'spdb_admin'@'%' AS
+DECLARE
+    -- Logic Variables
+    v_target_date DATE = COALESCE(p_start_date, DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY));
+    v_market_id_list TEXT;
+    v_sql TEXT;
+	
+	vRowcount bigint = 0;
+    vAppLogLevel varchar(100) CHARACTER SET utf8 COLLATE utf8_bin NULL;
+   v_calc_start datetime;
+    v_calc_end datetime;
+	-- Variables for logging
+    vActivityStartTime datetime(6);
+    vSessionIdentifier varchar(50);
+	
+	-- Audit Log Record
+    vOmAuditLog RECORD ( 
+                        spName varchar(256) CHARACTER SET utf8 COLLATE utf8_bin,
+                        sqlExecuted text CHARACTER SET utf8 COLLATE utf8_bin,
+                        sqlVariables text CHARACTER SET utf8 COLLATE utf8_bin,
+                        logTime datetime,
+                        errorCode int,
+                        errorMsg text CHARACTER SET utf8 COLLATE utf8_bin 
+                        ) = row(null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null);
+								
+BEGIN
+vOmAuditLog.spName = 'sp_insert_f_micro_outage_ericsson_4G_D';
+    vOmAuditLog.errorCode = 0;
+    vOmAuditLog.errorMsg = ' ';
+    
+    SELECT now(6) INTO vActivityStartTime;
+    SELECT uuid() INTO vSessionIdentifier;
+    
+  
+     v_calc_start = COALESCE(p_start_date, DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY));
+     v_calc_end   = COALESCE(p_end_date, DATE_ADD(CURRENT_DATE(), INTERVAL 1 DAY));
+
+    -- Get Log Level from Config
+    SELECT NVL(ANY_VALUE(KEY_VALUE),'ERROR') 
+    FROM APP_CONFIG 
+    WHERE APP_NAME = vOmAuditLog.spName AND APP_KEY = 'APP_LOG_LEVEL' 
+    INTO vAppLogLevel;    
+    
+    -- Main Execution Block (Runs for ERROR or DEBUG)
+    IF vAppLogLevel IN ('ERROR', 'DEBUG') THEN
+    
+    START TRANSACTION;
+	
+	
+    -- 1. Market ID Resolution
+    IF p_market_ids IS NOT NULL AND p_market_ids <> '' THEN
+        SELECT CONCAT("(", REPLACE(QUOTE(REPLACE(p_market_ids, ' ', '')), ',', "','"), ")") INTO v_market_id_list;
+    ELSE
+        SELECT CONCAT('(', GROUP_CONCAT(QUOTE(MARKET)), ')') 
+        FROM SPDB_NOTIFICATION_CONFIG 
+        WHERE notification_name = 'Micro_Outage' AND is_enabled = 'Y' 
+		INTO v_market_id_list;
+    END IF;
+	
+	IF v_market_id_list IS NULL OR v_market_id_list = '()' THEN
+        vOmAuditLog.errorMsg = 'No outage for Ericsson 4G markets found.';
+        CALL writeAuditLog(vOmAuditLog);
+        ROLLBACK;
+        RETURN;
+    END IF;
+   
+   vOmAuditLog.sqlVariables = CONCAT(IFNULL(p_start_date,'NULL'), ',', IFNULL(p_end_date,'NULL'), ',', IFNULL(p_market_ids,'NULL'));
+    vOmAuditLog.sqlExecuted = CONCAT('Starting Ericsson 4G Daily processing with params (', QUOTE(v_calc_start), ',', QUOTE(v_calc_end), ',', QUOTE(v_market_id_list), ');');
+    CALL writeAuditLog(vOmAuditLog);
+
+
+    -- 2. Dynamic SQL Construction
+    -- This logic handles the 10-day lookback for correlation and rolling 5-day window for flags
+    v_sql = CONCAT("
+    INSERT INTO F_MICRO_OUTAGE_ERICSON_4G_D (
+        ENODEB_SECTOR_CARRIER, 
+		STARTDATE, 
+		HR, 
+		TECHNOLOGY, 
+		REGION, 
+        MARKET_ID, 
+		MARKET_DESC, 
+		SITE_NAME, 
+		GNODEB, 
+		SECTOR, 
+        CARRIER, CELLDOWNTIME, CELLDOWNLOCK, `Bearer_Drop_%`, 
+        `Bearer_Drop_%_NUM`, `Bearer_Drop_%_DEN`,BEAR_DROP_TO_OUTAGE_CORRELATION, MICROOUTAGE_FLAG, MICROOUTAGE_FINAL_FLAG
+    )
+    WITH DAILY_BASE AS (
+        /* Aggregate Hourly Data to Daily for Flag Processing */
+        SELECT 
+            ENODEB_SECTOR_CARRIER,
+            STARTDATE,
+            ANY_VALUE(TECHNOLOGY) as TECHNOLOGY,
+            ANY_VALUE(REGION) as REGION,
+            ANY_VALUE(MARKET_ID) as MARKET_ID,
+            ANY_VALUE(MARKET_DESC) as MARKET_DESC,
+            ANY_VALUE(SITE_NAME) as SITE_NAME,
+            ANY_VALUE(GNODEB) as GNODEB,
+            ANY_VALUE(SECTOR) as SECTOR,
+            ANY_VALUE(CARRIER) as CARRIER,
+            SUM(CELLDOWNTIME) as daily_downtime,
+            SUM(CELLDOWNLOCK) as daily_lock,
+            SUM(`Bearer_Drop_%_NUM`) as daily_num,
+            SUM(`Bearer_Drop_%_DEN`) as daily_den
+        FROM F_MICRO_OUTAGE_ERICSON_4G_H
+        WHERE STARTDATE >= DATE_SUB('", v_target_date, "', INTERVAL 10 DAY)
+          AND MARKET_ID IN ", v_market_id_list, "
+        GROUP BY 1, 2
+    ),
+    CORRELATION_STATS AS (
+        /* Calculate Pearson Correlation Coefficient over the 10-day period */
+        SELECT 
+            ENODEB_SECTOR_CARRIER,
+            COALESCE(
+                (COUNT(*) * SUM(daily_lock * daily_num) - SUM(daily_lock) * SUM(daily_num)) / 
+                NULLIF(SQRT(
+                    (COUNT(*) * SUM(daily_lock * daily_lock) - POW(SUM(daily_lock), 2)) * (COUNT(*) * SUM(daily_num * daily_num) - POW(SUM(daily_num), 2))
+                ), 0), 0
+            ) AS correlation_val
+        FROM DAILY_BASE
+        GROUP BY 1
+    ),
+    FLAG_CALC AS (
+        /* Apply Micro Outage Thresholds */
+        SELECT 
+            b.*,
+            c.correlation_val,
+            CASE 
+                WHEN b.daily_lock > 1 
+                 AND (b.daily_num / NULLIF(b.daily_den, 0)) > 0.0020 
+                 AND b.daily_num > 200 
+                 AND c.correlation_val >= 0.005 
+                THEN 1 ELSE 0 
+            END AS micro_outage_score
+        FROM DAILY_BASE b
+        JOIN CORRELATION_STATS c ON b.ENODEB_SECTOR_CARRIER = c.ENODEB_SECTOR_CARRIER
+    )
+    SELECT 
+        h.ENODEB_SECTOR_CARRIER,
+        h.STARTDATE,
+        h.HR,
+        h.TECHNOLOGY,
+        h.REGION,
+        h.MARKET_ID,
+        h.MARKET_DESC,
+        h.SITE_NAME,
+        h.GNODEB,
+        h.SECTOR,
+        h.CARRIER,
+        h.CELLDOWNTIME,
+        h.CELLDOWNLOCK,
+        h.`Bearer_Drop_%`,
+        h.`Bearer_Drop_%_NUM`,
+        h.`Bearer_Drop_%_DEN`,
+f.correlation_val,
+        /* Micro Outage Flag */
+        IF(f.micro_outage_score = 1, 'Y', 'N'),
+        /* Micro Outage Final Flag: Rolling 5-day score >= 3 OR Daily Lock >= 50 */
+        CASE 
+            WHEN SUM(f.micro_outage_score) OVER (
+                PARTITION BY h.ENODEB_SECTOR_CARRIER 
+                ORDER BY h.STARTDATE 
+                ROWS BETWEEN 4 PRECEDING AND CURRENT ROW
+            ) >= 3 
+            OR f.daily_lock >= 50 
+            THEN 'Y' 
+            ELSE 'N' 
+        END
+    FROM F_MICRO_OUTAGE_ERICSON_4G_H h
+    JOIN FLAG_CALC f ON h.ENODEB_SECTOR_CARRIER = f.ENODEB_SECTOR_CARRIER 
+                    AND h.STARTDATE = f.STARTDATE
+    WHERE h.STARTDATE = '", v_target_date, "'
+    ON DUPLICATE KEY UPDATE 
+        MICROOUTAGE_FLAG = VALUES(MICROOUTAGE_FLAG),
+        MICROOUTAGE_FINAL_FLAG = VALUES(MICROOUTAGE_FINAL_FLAG);
+    ");
+
+    -- 3. Execution
+	 IF vAppLogLevel = 'ERROR' THEN
+            
+    EXECUTE IMMEDIATE v_sql;
+    vRowcount = row_count();
+COMMIT;
+            vOmAuditLog.sqlExecuted = CONCAT('Status: Insert Success | Records: ', vRowcount);
+        ELSE
+            -- DEBUG MODE: Rollback and do not insert
+            vRowcount = 0;
+            ROLLBACK;
+            vOmAuditLog.sqlExecuted = CONCAT('DEBUG MODE: Insert bypassed. Full SQL Generated: \n', v_sql);
+        END IF;
+
+        CALL writeAuditLog(vOmAuditLog);
+        
+        -- ACTIVITY LOG
+        INSERT INTO APP_ACTIVITIES_LOG (
+            APP_NAME,
+            BATCH_ID,
+            ACTIVITY_TYPE,
+            ACTIVITY_DETAILS,
+            ACTIVITY_OUTPUT, 
+            ACTIVITY_START_TS,
+            ACTIVITY_END_TS,
+            ACTIVITY_STATUS
+        ) VALUES (
+            vOmAuditLog.spName,
+            vSessionIdentifier,
+            'Micro outage Ericsson Hourly 4G', 
+            CASE WHEN vAppLogLevel = 'DEBUG' THEN CONCAT('SQL:\n', v_sql) ELSE vOmAuditLog.sqlVariables END, 
+            CONCAT('Level: ', vAppLogLevel, ' | Records: ', vRowcount), 
+            vActivityStartTime,
+            now(6),
+            'COMPLETE'
+        );
+
+        ECHO SELECT vOmAuditLog.spName AS APP_NAME, CONCAT('Records: ', vRowcount) AS STATUS, 'COMPLETE' AS REASON FROM DUAL;
+
+END IF;
+EXCEPTION
+    WHEN OTHERS THEN
+        ROLLBACK;
+        vOmAuditLog.errorMsg = exception_message();
+        vOmAuditLog.sqlExecuted = CONCAT('EXCEPTION: ', vOmAuditLog.errorMsg, ' | SQL (if any): ', IFNULL(v_sql, 'NONE'));
+        CALL writeAuditLog(vOmAuditLog);
+
+        INSERT INTO APP_ACTIVITIES_LOG (
+            APP_NAME,
+            BATCH_ID,
+            ACTIVITY_TYPE,
+            ACTIVITY_DETAILS,
+            ACTIVITY_ERROR_MSG, 
+            ACTIVITY_START_TS,
+            ACTIVITY_END_TS,
+            ACTIVITY_STATUS
+        ) VALUES (
+            vOmAuditLog.spName,
+            vSessionIdentifier,
+            'Sleepy Cell Ericsson Daily 4G', 
+            vOmAuditLog.sqlVariables,
+            vOmAuditLog.errorMsg,
+            vActivityStartTime,
+            now(6),
+            'EXCEPTION'
+        );
+        COMMIT;
+        
+        ECHO SELECT vOmAuditLog.spName AS APP_NAME, 'EXCEPTION' AS STATUS, exception_message() AS REASON FROM DUAL;
+        RAISE;
+END;

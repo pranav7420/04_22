@@ -1,0 +1,24 @@
+-- spdb.F_MICRO_OUTAGE_ERICSON_4G_H definition
+
+CREATE TABLE `F_MICRO_OUTAGE_ERICSON_4G_H` (
+  `ENODEB_SECTOR_CARRIER` varchar(50) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'Concatenated Unique ID' ,
+  `STARTDATE` date DEFAULT NULL COMMENT 'Day of the outage' ,
+  `HR` int(2) DEFAULT NULL COMMENT 'Hour of the outage' ,
+  `TECHNOLOGY` varchar(20) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'Network Technology (e.g., 5G)' ,
+  `REGION` varchar(50) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'Geographic region' ,
+  `MARKET_ID` varchar(3) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'Contains Market Code' ,
+  `MARKET_DESC` varchar(100) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'Full description of the market' ,
+  `SITE_NAME` varchar(255) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'site of the market' ,
+  `GNODEB` varchar(50) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL COMMENT 'gNodeB ID or name' ,
+  `SECTOR` int(11) DEFAULT NULL COMMENT 'Sector identifier' ,
+  `CARRIER` int(11) DEFAULT NULL COMMENT 'Carrier/Frequency identifier' ,
+  `CELLDOWNTIME` decimal(18,4) DEFAULT NULL COMMENT 'pmCellDowntimeAuto' ,
+  `CELLDOWNLOCK` decimal(18,4) DEFAULT NULL COMMENT 'pmCellDownLockAuto' ,
+  `Bearer_Drop_%` decimal(10,4) DEFAULT NULL COMMENT 'Drop percentage' ,
+  `Bearer_Drop_%_NUM` decimal(18,4) DEFAULT NULL COMMENT 'Drop percentage Numerator' ,
+  `Bearer_Drop_%_DEN` decimal(18,4) DEFAULT NULL COMMENT 'Drop percentage Denominator' ,
+  UNIQUE KEY `UNQ_OUTAGE` (`ENODEB_SECTOR_CARRIER`,`STARTDATE`,`HR`) USING HASH,
+  SHARD KEY `SHRD_OUTAGE` (`ENODEB_SECTOR_CARRIER`,`STARTDATE`),
+  SORT KEY `SRT_OUTAGE` (`STARTDATE`,`MARKET_ID`),
+  KEY `idx_filter` (`STARTDATE`,`MARKET_ID`) USING HASH
+) COMMENT 'Table tracking granular hourly network micro-outages' AUTOSTATS_CARDINALITY_MODE=OFF AUTOSTATS_HISTOGRAM_MODE=OFF AUTOSTATS_SAMPLING=OFF SQL_MODE='PIPES_AS_CONCAT,ONLY_FULL_GROUP_BY,STRICT_ALL_TABLES';

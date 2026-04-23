@@ -1,0 +1,207 @@
+CREATE OR REPLACE PROCEDURE `spdb`.`sp_insert_f_micro_outage_ericsson_4G_H`(p_start_date datetime NULL, p_end_date datetime NULL, p_market_ids varchar(500) CHARACTER SET utf8 COLLATE utf8_general_ci NULL) RETURNS void DEFINER = 'spdb_admin'@'%' AS
+DECLARE
+    -- Logic Variables
+    v_calc_start datetime;
+    v_calc_end datetime;
+    vMarketId text;
+    v_sql TEXT;
+
+    -- Formula Variables
+    v_raw_num TEXT; 
+    v_raw_den TEXT; 
+    v_f_e_num TEXT; 
+    v_f_e_den TEXT;
+    
+    vRowcount bigint = 0;
+    vAppLogLevel varchar(100) CHARACTER SET utf8 COLLATE utf8_bin NULL;
+    
+    -- Variables for logging
+    vActivityStartTime datetime(6);
+    vSessionIdentifier varchar(50);
+    
+    -- Audit Log Record
+    vOmAuditLog RECORD ( 
+        spName varchar(256) CHARACTER SET utf8 COLLATE utf8_bin,
+        sqlExecuted text CHARACTER SET utf8 COLLATE utf8_bin,
+        sqlVariables text CHARACTER SET utf8 COLLATE utf8_bin,
+        logTime datetime,
+        errorCode int,
+        errorMsg text CHARACTER SET utf8 COLLATE utf8_bin 
+    ) = row(null, null, null, null, null, null);
+BEGIN
+    vOmAuditLog.spName = 'sp_insert_f_micro_outage_ericsson_4G_H';
+    vOmAuditLog.errorCode = 0;
+    vOmAuditLog.errorMsg = ' ';
+    
+    vActivityStartTime = now(6);
+    vSessionIdentifier = uuid();
+    
+    v_calc_start = COALESCE(p_start_date, DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY));
+    v_calc_end   = COALESCE(p_end_date, DATE_ADD(CURRENT_DATE(), INTERVAL 1 DAY));
+
+    -- Get Log Level
+    SELECT NVL(ANY_VALUE(KEY_VALUE),'ERROR') 
+    FROM APP_CONFIG 
+    WHERE APP_NAME = vOmAuditLog.spName AND APP_KEY = 'APP_LOG_LEVEL' 
+    INTO vAppLogLevel;    
+    
+    IF vAppLogLevel IN ('ERROR', 'DEBUG') THEN
+    
+        START TRANSACTION;
+
+        -- 1. Market ID Resolution (Makes input like '036, 037' into ('036','037'))
+        IF p_market_ids IS NOT NULL AND p_market_ids <> '' THEN
+            SELECT CONCAT("(", REPLACE(QUOTE(REPLACE(p_market_ids, ' ', '')), ',', "','"), ")") INTO vMarketId;
+        ELSE
+            SELECT CONCAT('(', GROUP_CONCAT(QUOTE(MARKET)), ')') 
+            FROM SPDB_NOTIFICATION_CONFIG 
+            WHERE notification_name = 'Micro_Outage' AND is_enabled = 'Y' INTO vMarketId;
+        END IF;
+
+        IF vMarketId IS NULL OR vMarketId = '()' THEN
+            vOmAuditLog.errorMsg = 'No outage for Ericsson 4G markets found.';
+            CALL writeAuditLog(vOmAuditLog);
+            ROLLBACK;
+            RETURN;
+        END IF;
+       
+        vOmAuditLog.sqlVariables = CONCAT(IFNULL(p_start_date,'NULL'), ',', IFNULL(p_end_date,'NULL'), ',', IFNULL(p_market_ids,'NULL'));
+        vOmAuditLog.sqlExecuted = CONCAT('Starting Ericsson 4G Hourly processing with params (', QUOTE(v_calc_start), ',', QUOTE(v_calc_end), ',', QUOTE(vMarketId), ');');
+        CALL writeAuditLog(vOmAuditLog);
+
+        -- 2. Fetch Formulas
+        SELECT 
+            MAX(CASE WHEN KPI_NAME='Bearer_Drop%_Num' THEN KPI_FORMULA END),
+            MAX(CASE WHEN KPI_NAME='Bearer_Drop%_Den' THEN KPI_FORMULA END)
+        INTO v_raw_num, v_raw_den
+        FROM SPDB_RULES 
+        WHERE TECHNOLOGY = '4G' AND VENDOR = 'Ericsson' AND IS_ACTIVE='Y';
+
+        v_f_e_num = REPLACE(REPLACE(COALESCE(v_raw_num, '0'), 'EUTRANCELL_ERAB:', 'a.'), 'EUTRANCELL_PMFLEX_CATM1:', 'b.');
+        v_f_e_den = REPLACE(REPLACE(COALESCE(v_raw_den, '0'), 'EUTRANCELL_ERAB:', 'a.'), 'EUTRANCELL_PMFLEX_CATM1:', 'b.');
+
+        -- 4. Dynamic SQL Construction
+        v_sql = CONCAT("
+        INSERT INTO F_MICRO_OUTAGE_ERICSON_4G_H (
+            ENODEB_SECTOR_CARRIER, STARTDATE, HR, TECHNOLOGY, REGION, 
+            MARKET_ID, MARKET_DESC, SITE_NAME, GNODEB, SECTOR, CARRIER, 
+            CELLDOWNTIME, CELLDOWNLOCK, `Bearer_Drop_%`, `Bearer_Drop_%_NUM`, `Bearer_Drop_%_DEN`
+        )
+        WITH Filtered_Cells AS (
+            SELECT 
+                ENODEB_SECTOR_CARRIER, ENODEB, NETWORK_MARKET, MKT_ID, 
+                NETWORK_LOCAL_MARKET, SITE_NAME, SECTOR, CARRIER
+            FROM tblSITE_ZITE
+            WHERE MKT_ID IN ", vMarketId, "
+        ),
+        CTE_ERAB AS (                                                                        
+            SELECT                                                                         
+                cell_key,                                                                        
+                DATE_TRUNC('hour', STARTDATE) AS kpi_hour,                                                                        
+                COALESCE(SUM(pmErabRelAbnormalEnb), 0) AS pmErabRelAbnormalEnb,                                                                        
+                COALESCE(SUM(pmErabRelAbnormalEnbQci1), 0) AS pmErabRelAbnormalEnbQci1,                                                                        
+                COALESCE(SUM(pmErabRelMmeAct), 0) AS pmErabRelMmeAct,                                                                        
+                COALESCE(SUM(pmErabRelMmeActQci1), 0) AS pmErabRelMmeActQci1,                                                                        
+                COALESCE(SUM(pmErabRelNormalEnb), 0) AS pmErabRelNormalEnb,                                                                        
+                COALESCE(SUM(pmErabRelNormalEnbQci1), 0) AS pmErabRelNormalEnbQci1,                                                                        
+                COALESCE(SUM(pmErabRelMme), 0) AS pmErabRelMme,                                                                        
+                COALESCE(SUM(pmErabRelMmeQci1), 0) AS pmErabRelMmeQci1                                                                        
+            FROM (                                                                        
+                SELECT rrc.*, sz.ENODEB_SECTOR_CARRIER AS cell_key,
+                    RANK() OVER (PARTITION BY rrc.STARTDATE, rrc.NETWORK_ELEMENT_ID ORDER BY rrc.CREATED_DATE DESC) as rnk                                                                        
+                FROM EUTRANCELL_ERAB_R rrc                                                                        
+                INNER JOIN E_NETWORK_ELEMENT ne ON ne.PK_ID = rrc.NETWORK_ELEMENT_ID 
+                INNER JOIN Filtered_Cells sz ON ne.ENODEB_ID = sz.ENODEB 
+                WHERE rrc.STARTDATE >= '", v_calc_start, "' AND rrc.STARTDATE <= '", v_calc_end, "'
+                AND ne.LTE_VZW_ID IN ", vMarketId, " -- DYNAMIC MARKET FILTER
+            ) t WHERE t.rnk = 1 GROUP BY 1, 2                                                                        
+        ),                                                                        
+        CTE_CATM1 AS (                                                                        
+            SELECT                                                                         
+                cell_key,                                                                        
+                DATE_TRUNC('hour', STARTDATE) AS kpi_hour,                                                                        
+                COALESCE(SUM(PMFLEXERABRELABNRENB_UECAT0), 0) AS pmFlexErabRelAbnormalEnb_UeCat0,                                                                        
+                COALESCE(SUM(PMFXERABRELMMEACT_CT0), 0) AS pmFlexErabRelMmeAct_UeCat0,                                                                        
+                COALESCE(SUM(PMFLEXERABRELNORMALENB_UECAT0), 0) AS pmFlexErabRelNormalEnb_UeCat0,                                                                        
+                COALESCE(SUM(PMFLEXERABRELMME_UECAT0), 0) AS pmFlexErabRelMme_UeCat0                                                                        
+            FROM (                                                                        
+                SELECT rrc.*, sz.ENODEB_SECTOR_CARRIER AS cell_key,
+                    RANK() OVER (PARTITION BY rrc.STARTDATE, rrc.NETWORK_ELEMENT_ID ORDER BY rrc.CREATED_DATE DESC) as rnk                                                                        
+                FROM EUTRANCELL_PMFLEX_CATM1_R rrc                                                                        
+                INNER JOIN E_NETWORK_ELEMENT ne ON ne.PK_ID = rrc.NETWORK_ELEMENT_ID
+                INNER JOIN Filtered_Cells sz ON ne.ENODEB_ID = sz.ENODEB
+                WHERE rrc.STARTDATE >= '", v_calc_start, "' AND rrc.STARTDATE <= '", v_calc_end, "'
+                AND ne.LTE_VZW_ID IN ", vMarketId, " -- DYNAMIC MARKET FILTER
+            ) t WHERE t.rnk = 1 GROUP BY 1, 2                                                                        
+        ),                                                                        
+        CTE_AVAIL AS (                                                                        
+            SELECT                                                                         
+                cell_key,                                                                        
+                DATE_TRUNC('hour', STARTDATE) AS kpi_hour,                                                                        
+                COALESCE(SUM(pmCellDowntimeAuto), 0) AS pmCellDowntimeAuto,                                                                        
+                COALESCE(SUM(pmCellDownLockAuto), 0) AS pmCellDownLockAuto                                                                        
+            FROM (                                                                        
+                SELECT rrc.pmCellDowntimeAuto, rrc.pmCellDownLockAuto, rrc.STARTDATE, sz.ENODEB_SECTOR_CARRIER AS cell_key,
+                    RANK() OVER (PARTITION BY rrc.STARTDATE, rrc.NETWORK_ELEMENT_ID ORDER BY rrc.CREATED_DATE DESC) as rnk                                                                        
+                FROM EUTRANCELL_AVAILABILITY_15_R rrc                                                                        
+                INNER JOIN E_NETWORK_ELEMENT ne ON ne.PK_ID = rrc.NETWORK_ELEMENT_ID
+                INNER JOIN Filtered_Cells sz ON ne.ENODEB_ID = sz.ENODEB
+                WHERE rrc.STARTDATE >= '", v_calc_start, "' AND rrc.STARTDATE <= '", v_calc_end, "'
+                AND ne.LTE_VZW_ID IN ", vMarketId, " -- DYNAMIC MARKET FILTER
+            ) t WHERE t.rnk = 1 GROUP BY 1, 2                                                                        
+        )
+        SELECT 
+            sz.ENODEB_SECTOR_CARRIER, CAST(a.kpi_hour AS DATE), HOUR(a.kpi_hour), '4G', sz.NETWORK_MARKET, 
+            sz.MKT_ID, sz.NETWORK_LOCAL_MARKET, sz.SITE_NAME, sz.ENODEB, sz.SECTOR, sz.CARRIER, 
+            COALESCE(v.pmCellDowntimeAuto, 0), COALESCE(v.pmCellDownLockAuto, 0), 
+            (100.0 * (", v_f_e_num, ") / NULLIF((", v_f_e_den, "), 0)), 
+            (", v_f_e_num, "), (", v_f_e_den, ") 
+        FROM Filtered_Cells sz
+        INNER JOIN CTE_ERAB a ON a.cell_key = sz.ENODEB_SECTOR_CARRIER
+        LEFT JOIN CTE_CATM1 b ON a.cell_key = b.cell_key AND a.kpi_hour = b.kpi_hour
+        LEFT JOIN CTE_AVAIL v ON a.cell_key = v.cell_key AND a.kpi_hour = v.kpi_hour
+        ON DUPLICATE KEY UPDATE 
+            CELLDOWNTIME = VALUES(CELLDOWNTIME),
+            CELLDOWNLOCK = VALUES(CELLDOWNLOCK),
+            `Bearer_Drop_%` = VALUES(`Bearer_Drop_%`);
+        ");
+
+        -- 5. Execution
+        IF vAppLogLevel = 'ERROR' THEN
+            EXECUTE IMMEDIATE v_sql;
+            vRowcount = row_count();
+            COMMIT;
+            vOmAuditLog.sqlExecuted = CONCAT('Status: Insert Success | Records: ', vRowcount);
+        ELSE
+            vRowcount = 0;
+            ROLLBACK;
+            vOmAuditLog.sqlExecuted = CONCAT('DEBUG MODE: SQL: \n', v_sql);
+        END IF;
+
+        CALL writeAuditLog(vOmAuditLog);
+        
+        -- Activity Log
+        INSERT INTO APP_ACTIVITIES_LOG (
+            APP_NAME, BATCH_ID, ACTIVITY_TYPE, ACTIVITY_DETAILS, ACTIVITY_OUTPUT, 
+            ACTIVITY_START_TS, ACTIVITY_END_TS, ACTIVITY_STATUS
+        ) VALUES (
+            vOmAuditLog.spName, vSessionIdentifier, 'Micro outage Ericsson Hourly 4G', 
+            CASE WHEN vAppLogLevel = 'DEBUG' THEN CONCAT('SQL:\n', v_sql) ELSE vOmAuditLog.sqlVariables END, 
+            CONCAT('Level: ', vAppLogLevel, ' | Records: ', vRowcount), 
+            vActivityStartTime, now(6), 'COMPLETE'
+        );
+
+        ECHO SELECT vOmAuditLog.spName AS APP_NAME, CONCAT('Records: ', vRowcount) AS STATUS, 'COMPLETE' AS REASON FROM DUAL;
+
+    END IF;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        ROLLBACK;
+        vOmAuditLog.errorMsg = exception_message();
+        vOmAuditLog.sqlExecuted = CONCAT('EXCEPTION: ', vOmAuditLog.errorMsg, ' | SQL: ', IFNULL(v_sql, 'NONE'));
+        CALL writeAuditLog(vOmAuditLog);
+        -- Insert Activity Log for Failure
+        COMMIT;
+        RAISE;
+END;
