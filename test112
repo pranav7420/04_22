@@ -1,385 +1,207 @@
-SELECT DISTINCT b.SUBMARKET_CODE
-          INTO V_SUBMARKET_CODE
-          FROM tblSITE_ZITE a
-          JOIN SPDB_NOTIFICATION_CONFIG b
-            ON a.mkt_id = b.market
-         WHERE a.enodeb = IN_GNODEB
-         LIMIT 1;
+Good question — this is where subtle SQL choices matter.
 
+---
 
-V_SUBMARKET_CODE VARCHAR(50);
-    V_TABLE_NAME VARCHAR(200);
-    V_SQL LONGTEXT;
+# 🔍 Difference: `LOCATE` vs `FIND_IN_SET`
 
+## 1) `LOCATE` (what you were using)
 
+```sql
+LOCATE('value', 'string')
+```
 
+👉 It is just a **substring search**
 
+Example:
 
-CREATE OR REPLACE PROCEDURE `spdb`.`SP_GET_SLEEPY_CELL_DATA_SPDB_4G_5G`(
-    IN IN_FLOW_TYPE varchar(20) CHARACTER SET utf8 COLLATE utf8_general_ci NULL,
-    IN IN_GNODEB varchar(50) CHARACTER SET utf8 COLLATE utf8_general_ci NULL,
-    IN IN_DU int(11) NULL,
-    IN IN_MARKET_CSV text CHARACTER SET utf8 COLLATE utf8_general_ci NULL,
-    IN IN_GEOFENCE_NODE_CSV longtext CHARACTER SET utf8 COLLATE utf8_general_ci NULL,
-    IN IN_START_DATE datetime NULL,
-    IN IN_END_DATE datetime NULL,
-    IN IN_SEVERITY varchar(10) CHARACTER SET utf8 COLLATE utf8_general_ci NULL
-) RETURNS void
-DEFINER = 'spdb_admin'@'%'
-AS
-DECLARE
-    V_FLOW_TYPE VARCHAR(20);
-    V_SUBMARKET_CODE VARCHAR(50);
-    V_TABLE_NAME VARCHAR(200);
-    V_SQL LONGTEXT;
-BEGIN
-    V_FLOW_TYPE = LOWER(IFNULL(NULLIF(TRIM(IN_FLOW_TYPE), ''), 'event'));
+```sql
+LOCATE('72', '072,073,074') → TRUE ❌ (WRONG match)
+```
 
-    /* =========================================================
-       FLOW 1 : EVENT
-       - optimize by resolving submarket and hitting only one table
-       ========================================================= */
-    IF V_FLOW_TYPE = 'event' THEN
+### Problem:
 
-        SELECT DISTINCT b.SUBMARKET_CODE
-          INTO V_SUBMARKET_CODE
-          FROM tblSITE_ZITE a
-          JOIN SPDB_NOTIFICATION_CONFIG b
-            ON a.mkt_id = b.market
-         WHERE a.enodeb = IN_GNODEB
-         LIMIT 1;
+* It does **partial matching**
+* You had to wrap with commas:
 
-        IF V_SUBMARKET_CODE IS NULL OR TRIM(V_SUBMARKET_CODE) = '' THEN
-            ECHO
-            SELECT
-                NULL AS ENODEB_SECTOR_CARRIER,
-                NULL AS ENODEB_DU_SECTOR_CARRIER,
-                NULL AS MARKET_ID,
-                NULL AS STARTDATE,
-                NULL AS GNODEB,
-                NULL AS DU,
-                NULL AS SECTOR,
-                NULL AS CARRIER,
-                NULL AS TECHNOLOGY,
-                NULL AS VENDOR,
-                NULL AS SITE_NAME,
-                NULL AS SITE_TYPE,
-                NULL AS BAND_CLASS,
-                NULL AS FREQUENCY_BAND,
-                NULL AS AFFECTED_KPI,
-                NULL AS HRS_AFFECTED,
-                NULL AS SC_CONSECUTIVE_DURATION,
-                NULL AS SLEPPYCELL_OCCUR_D,
-                NULL AS WoW_TREND,
-                NULL AS `30D_VOLUME_AVERAGE`,
-                NULL AS SEVERITY,
-                NULL AS TICKET_ID,
-                NULL AS TICKET_CLOSE_STATUS
-            FROM (SELECT 1 AS DUMMY_COL) x
-            WHERE 1 = 0;
+```sql
+LOCATE(CONCAT(',', t.GNODEB, ','), CONCAT(',', IN_GEOFENCE_NODE_CSV, ','))
+```
 
-        ELSE
+👉 That was a workaround to avoid partial matches
 
-            /* Optional whitelist protection */
-            IF V_SUBMARKET_CODE NOT IN (
-                'MINKY','OHPA','HGC','SW','GAAL','CARTN','NYM','PNW','FLORIDA',
-                'SOCAL','NORCAL','MTN','NE','CTX','ILWI','WBV','KSMO','PTS','GP','UPNY'
-            ) THEN
-                ECHO
-                SELECT
-                    NULL AS ENODEB_SECTOR_CARRIER,
-                    NULL AS ENODEB_DU_SECTOR_CARRIER,
-                    NULL AS MARKET_ID,
-                    NULL AS STARTDATE,
-                    NULL AS GNODEB,
-                    NULL AS DU,
-                    NULL AS SECTOR,
-                    NULL AS CARRIER,
-                    NULL AS TECHNOLOGY,
-                    NULL AS VENDOR,
-                    NULL AS SITE_NAME,
-                    NULL AS SITE_TYPE,
-                    NULL AS BAND_CLASS,
-                    NULL AS FREQUENCY_BAND,
-                    NULL AS AFFECTED_KPI,
-                    NULL AS HRS_AFFECTED,
-                    NULL AS SC_CONSECUTIVE_DURATION,
-                    NULL AS SLEPPYCELL_OCCUR_D,
-                    NULL AS WoW_TREND,
-                    NULL AS `30D_VOLUME_AVERAGE`,
-                    NULL AS SEVERITY,
-                    NULL AS TICKET_ID,
-                    NULL AS TICKET_CLOSE_STATUS
-                FROM (SELECT 1 AS DUMMY_COL) x
-                WHERE 1 = 0;
+---
 
-            ELSE
+## 2) `FIND_IN_SET` (what we switched to)
 
-                IF IN_DU IS NULL THEN
-                    V_TABLE_NAME = CONCAT('spdb.F_SLEEPY_CELL_', V_SUBMARKET_CODE, '_4G_H');
+```sql
+FIND_IN_SET(value, 'a,b,c')
+```
 
-                    V_SQL = CONCAT(
-                        'SELECT ',
-                        't.ENODEB_SECTOR_CARRIER, ',
-                        'NULL AS ENODEB_DU_SECTOR_CARRIER, ',
-                        't.MARKET_ID, ',
-                        't.STARTDATE, ',
-                        't.GNODEB, ',
-                        'NULL AS DU, ',
-                        't.SECTOR, ',
-                        't.CARRIER, ',
-                        't.TECHNOLOGY, ',
-                        't.VENDOR, ',
-                        't.SITE_NAME, ',
-                        't.SITE_TYPE, ',
-                        't.BAND_CLASS, ',
-                        't.FREQUENCY_BAND, ',
-                        't.AFFECTED_KPI, ',
-                        't.HRS_AFFECTED, ',
-                        't.SC_CONSECUTIVE_DURATION, ',
-                        't.SLEPPYCELL_OCCUR_D, ',
-                        't.WoW_TREND, ',
-                        't.`30D_VOLUME_AVERAGE` AS `30D_VOLUME_AVERAGE`, ',
-                        't.SEVERITY, ',
-                        't.TICKET_ID, ',
-                        't.TICKET_CLOSE_STATUS ',
-                        'FROM ', V_TABLE_NAME, ' t ',
-                        'WHERE t.GNODEB = ? ',
-                        'AND t.STARTDATE >= ? ',
-                        'AND t.STARTDATE < DATE_ADD(?, INTERVAL 1 DAY) ',
-                        'AND t.SLEEPY_CELL_KAFKA_FLAG = ''Y'' ',
-                        'AND t.SLEEPY_CELLS_FINAL_FLAG = ''Y'' ',
-                        'AND (t.SEVERITY = ? OR ? IS NULL) ',
-                        'ORDER BY t.STARTDATE'
-                    );
+👉 It is a **true CSV lookup**
 
-                    ECHO EXECUTE IMMEDIATE V_SQL
-                        USING IN_GNODEB, IN_START_DATE, IN_END_DATE, IN_SEVERITY, IN_SEVERITY;
+Example:
 
-                ELSE
-                    V_TABLE_NAME = CONCAT('spdb.F_SLEEPY_CELL_', V_SUBMARKET_CODE, '_5G_H');
+```sql
+FIND_IN_SET('072', '071,072,073') → TRUE ✅
+FIND_IN_SET('72',  '071,072,073') → FALSE ✅
+```
 
-                    V_SQL = CONCAT(
-                        'SELECT ',
-                        'NULL AS ENODEB_SECTOR_CARRIER, ',
-                        't.ENODEB_DU_SECTOR_CARRIER, ',
-                        't.MARKET_ID, ',
-                        't.STARTDATE, ',
-                        't.GNODEB, ',
-                        't.DU, ',
-                        't.SECTOR, ',
-                        't.CARRIER, ',
-                        't.TECHNOLOGY, ',
-                        't.VENDOR, ',
-                        't.SITE_NAME, ',
-                        't.SITE_TYPE, ',
-                        't.BAND_CLASS, ',
-                        't.FREQUENCY_BAND, ',
-                        't.AFFECTED_KPI, ',
-                        't.HRS_AFFECTED, ',
-                        't.SC_CONSECUTIVE_DURATION, ',
-                        't.SLEPPYCELL_OCCUR_D, ',
-                        't.WoW_TREND, ',
-                        't.`30D_VOLUME_AVERAGE` AS `30D_VOLUME_AVERAGE`, ',
-                        't.SEVERITY, ',
-                        't.TICKET_ID, ',
-                        't.TICKET_CLOSE_STATUS ',
-                        'FROM ', V_TABLE_NAME, ' t ',
-                        'WHERE t.GNODEB = ? ',
-                        'AND t.DU = ? ',
-                        'AND t.STARTDATE >= ? ',
-                        'AND t.STARTDATE < DATE_ADD(?, INTERVAL 1 DAY) ',
-                        'AND t.SLEEPY_CELLS_FINAL_FLAG = ''Y'' ',
-                        'AND (t.SEVERITY = ? OR ? IS NULL) ',
-                        'ORDER BY t.STARTDATE'
-                    );
+### Key behavior:
 
-                    ECHO EXECUTE IMMEDIATE V_SQL
-                        USING IN_GNODEB, IN_DU, IN_START_DATE, IN_END_DATE, IN_SEVERITY, IN_SEVERITY;
-                END IF;
+* Matches **exact values only**
+* Automatically handles commas
+* No need for `CONCAT(',', ...)`
 
-            END IF;
-        END IF;
+---
 
-    /* =========================================================
-       FLOW 2 : MARKET
-       - keep existing logic
-       ========================================================= */
-    ELSIF V_FLOW_TYPE = 'market' THEN
+# 🧠 Why your lead prefers this
 
-        ECHO
-        SELECT *
-        FROM (
-            SELECT
-                t.ENODEB_SECTOR_CARRIER,
-                NULL AS ENODEB_DU_SECTOR_CARRIER,
-                t.MARKET_ID,
-                t.STARTDATE,
-                t.GNODEB,
-                NULL AS DU,
-                t.SECTOR,
-                t.CARRIER,
-                t.TECHNOLOGY,
-                t.VENDOR,
-                t.SITE_NAME,
-                t.SITE_TYPE,
-                t.BAND_CLASS,
-                t.FREQUENCY_BAND,
-                t.AFFECTED_KPI,
-                t.HRS_AFFECTED,
-                t.SC_CONSECUTIVE_DURATION,
-                t.SLEPPYCELL_OCCUR_D,
-                t.WoW_TREND,
-                t.`30D_VOLUME_AVERAGE` AS `30D_VOLUME_AVERAGE`,
-                t.SEVERITY,
-                t.TICKET_ID,
-                t.TICKET_CLOSE_STATUS
-            FROM V_F_SLEEPY_CELL_4G_H t
-            WHERE LOCATE(CONCAT(',', CAST(t.MARKET_ID AS CHAR), ','), CONCAT(',', IN_MARKET_CSV, ',')) > 0
-              AND t.STARTDATE >= IN_START_DATE
-              AND t.STARTDATE < DATE_ADD(IN_END_DATE, INTERVAL 1 DAY)
-              AND t.SLEEPY_CELL_KAFKA_FLAG = 'Y'
-              AND t.SLEEPY_CELLS_FINAL_FLAG = 'Y'
-              AND (t.SEVERITY = IN_SEVERITY OR IN_SEVERITY IS NULL)
+Your lead said:
 
-            UNION ALL
+> “append WHERE market_id IN () / enodeb IN ()”
 
-            SELECT
-                NULL AS ENODEB_SECTOR_CARRIER,
-                t.ENODEB_DU_SECTOR_CARRIER,
-                t.MARKET_ID,
-                t.STARTDATE,
-                t.GNODEB,
-                t.DU,
-                t.SECTOR,
-                t.CARRIER,
-                t.TECHNOLOGY,
-                t.VENDOR,
-                t.SITE_NAME,
-                t.SITE_TYPE,
-                t.BAND_CLASS,
-                t.FREQUENCY_BAND,
-                t.AFFECTED_KPI,
-                t.HRS_AFFECTED,
-                t.SC_CONSECUTIVE_DURATION,
-                t.SLEPPYCELL_OCCUR_D,
-                t.WoW_TREND,
-                t.`30D_VOLUME_AVERAGE` AS `30D_VOLUME_AVERAGE`,
-                t.SEVERITY,
-                t.TICKET_ID,
-                t.TICKET_CLOSE_STATUS
-            FROM V_F_SLEEPY_CELL_5G_H t
-            WHERE LOCATE(CONCAT(',', CAST(t.MARKET_ID AS CHAR), ','), CONCAT(',', IN_MARKET_CSV, ',')) > 0
-              AND t.STARTDATE >= IN_START_DATE
-              AND t.STARTDATE < DATE_ADD(IN_END_DATE, INTERVAL 1 DAY)
-              AND t.SLEEPY_CELLS_FINAL_FLAG = 'Y'
-              AND (t.SEVERITY = IN_SEVERITY OR IN_SEVERITY IS NULL)
-        ) x
-        ORDER BY x.STARTDATE;
+👉 That means:
 
-    /* =========================================================
-       FLOW 3 : GEOFENCE
-       - keep existing logic
-       ========================================================= */
-    ELSIF V_FLOW_TYPE = 'geofence' THEN
+* treat input as a **list of discrete values**
+* not as a string to pattern-match
 
-        ECHO
-        SELECT *
-        FROM (
-            SELECT
-                t.ENODEB_SECTOR_CARRIER,
-                NULL AS ENODEB_DU_SECTOR_CARRIER,
-                t.MARKET_ID,
-                t.STARTDATE,
-                t.GNODEB,
-                NULL AS DU,
-                t.SECTOR,
-                t.CARRIER,
-                t.TECHNOLOGY,
-                t.VENDOR,
-                t.SITE_NAME,
-                t.SITE_TYPE,
-                t.BAND_CLASS,
-                t.FREQUENCY_BAND,
-                t.AFFECTED_KPI,
-                t.HRS_AFFECTED,
-                t.SC_CONSECUTIVE_DURATION,
-                t.SLEPPYCELL_OCCUR_D,
-                t.WoW_TREND,
-                t.`30D_VOLUME_AVERAGE` AS `30D_VOLUME_AVERAGE`,
-                t.SEVERITY,
-                t.TICKET_ID,
-                t.TICKET_CLOSE_STATUS
-            FROM V_F_SLEEPY_CELL_4G_H t
-            WHERE LOCATE(CONCAT(',', t.GNODEB, ','), CONCAT(',', IN_GEOFENCE_NODE_CSV, ',')) > 0
-              AND t.STARTDATE >= IN_START_DATE
-              AND t.STARTDATE < DATE_ADD(IN_END_DATE, INTERVAL 1 DAY)
-              AND t.SLEEPY_CELL_KAFKA_FLAG = 'Y'
-              AND t.SLEEPY_CELLS_FINAL_FLAG = 'Y'
-              AND (t.SEVERITY = IN_SEVERITY OR IN_SEVERITY IS NULL)
+`FIND_IN_SET` behaves closest to SQL:
 
-            UNION ALL
+```sql
+WHERE column IN (...)
+```
 
-            SELECT
-                NULL AS ENODEB_SECTOR_CARRIER,
-                t.ENODEB_DU_SECTOR_CARRIER,
-                t.MARKET_ID,
-                t.STARTDATE,
-                t.GNODEB,
-                t.DU,
-                t.SECTOR,
-                t.CARRIER,
-                t.TECHNOLOGY,
-                t.VENDOR,
-                t.SITE_NAME,
-                t.SITE_TYPE,
-                t.BAND_CLASS,
-                t.FREQUENCY_BAND,
-                t.AFFECTED_KPI,
-                t.HRS_AFFECTED,
-                t.SC_CONSECUTIVE_DURATION,
-                t.SLEPPYCELL_OCCUR_D,
-                t.WoW_TREND,
-                t.`30D_VOLUME_AVERAGE` AS `30D_VOLUME_AVERAGE`,
-                t.SEVERITY,
-                t.TICKET_ID,
-                t.TICKET_CLOSE_STATUS
-            FROM V_F_SLEEPY_CELL_5G_H t
-            WHERE LOCATE(CONCAT(',', t.GNODEB, ','), CONCAT(',', IN_GEOFENCE_NODE_CSV, ',')) > 0
-              AND t.STARTDATE >= IN_START_DATE
-              AND t.STARTDATE < DATE_ADD(IN_END_DATE, INTERVAL 1 DAY)
-              AND t.SLEEPY_CELLS_FINAL_FLAG = 'Y'
-              AND (t.SEVERITY = IN_SEVERITY OR IN_SEVERITY IS NULL)
-        ) x
-        ORDER BY x.STARTDATE;
+---
 
-    ELSE
-        ECHO
-        SELECT
-            NULL AS ENODEB_SECTOR_CARRIER,
-            NULL AS ENODEB_DU_SECTOR_CARRIER,
-            NULL AS MARKET_ID,
-            NULL AS STARTDATE,
-            NULL AS GNODEB,
-            NULL AS DU,
-            NULL AS SECTOR,
-            NULL AS CARRIER,
-            NULL AS TECHNOLOGY,
-            NULL AS VENDOR,
-            NULL AS SITE_NAME,
-            NULL AS SITE_TYPE,
-            NULL AS BAND_CLASS,
-            NULL AS FREQUENCY_BAND,
-            NULL AS AFFECTED_KPI,
-            NULL AS HRS_AFFECTED,
-            NULL AS SC_CONSECUTIVE_DURATION,
-            NULL AS SLEPPYCELL_OCCUR_D,
-            NULL AS WoW_TREND,
-            NULL AS `30D_VOLUME_AVERAGE`,
-            NULL AS SEVERITY,
-            NULL AS TICKET_ID,
-            NULL AS TICKET_CLOSE_STATUS
-        FROM (SELECT 1 AS DUMMY_COL) x
-        WHERE 1 = 0;
-    END IF;
-END;
+# 🔥 Exact change you made
+
+## Before (your workaround)
+
+```sql
+WHERE LOCATE(CONCAT(',', t.GNODEB, ','), CONCAT(',', IN_GEOFENCE_NODE_CSV, ',')) > 0
+```
+
+👉 Meaning:
+
+* “Find this substring inside that string”
+
+---
+
+## After (correct approach)
+
+```sql
+WHERE FIND_IN_SET(t.GNODEB, IN_GEOFENCE_NODE_CSV) > 0
+```
+
+👉 Meaning:
+
+* “Check if GNODEB is one of the values in the list”
+
+---
+
+# 🎯 What change are we really making?
+
+### ❌ Before:
+
+You were doing:
+
+> “string contains logic”
+
+### ✅ After:
+
+You are doing:
+
+> “set membership logic”
+
+---
+
+# 🧠 In plain English
+
+| Old logic                                | New logic                     |
+| ---------------------------------------- | ----------------------------- |
+| “Is this text present inside that text?” | “Is this value in this list?” |
+| fragile                                  | precise                       |
+| workaround-heavy                         | clean                         |
+| harder to read                           | aligns with SQL thinking      |
+
+---
+
+# 📌 Why this satisfies your lead
+
+Your lead said:
+
+> “same query, just append WHERE market_id IN () / enodeb IN ()”
+
+👉 You cannot directly use `IN (csv_string)` in MySQL/MemSQL
+
+So the **closest equivalent** is:
+
+```sql
+FIND_IN_SET(column, csv_string)
+```
+
+✔ behaves like `IN`
+✔ simple
+✔ readable
+✔ no hacks
+
+---
+
+# ⚠️ One important note (performance)
+
+Both:
+
+* `LOCATE`
+* `FIND_IN_SET`
+
+👉 **do NOT use indexes**
+
+So performance is:
+
+| Function    | Index usage |
+| ----------- | ----------- |
+| LOCATE      | ❌           |
+| FIND_IN_SET | ❌           |
+
+👉 So this change is about:
+
+* correctness
+* readability
+* maintainability
+
+NOT performance
+
+---
+
+# 🟢 Final takeaway
+
+### What you changed:
+
+```sql
+LOCATE(...)  →  FIND_IN_SET(...)
+```
+
+### What it means:
+
+* From **string matching** → **list membership**
+* Cleaner and closer to:
+
+```sql
+WHERE column IN (...)
+```
+
+### Why it's correct:
+
+* avoids partial matches
+* simpler
+* matches your lead’s design
+
+---
+
+# 🚀 If you want next
+
+I can show you how to:
+👉 convert this into **true indexed filtering (temp table / join)**
+👉 which gives real performance gain for large geofence lists (1000+ nodes)
+
+That would be the next real optimization step.
