@@ -110,4 +110,14 @@ WHERE FIND_IN_SET(t.GNODEB, IN_GEOFENCE_NODE_CSV) > 0
 
 ---
 
+
+
+
+
+
+
+
+
+SQL Error [1064] [42000]: Forwarding Error (192.168.50.140:3307): Compilation error in function `spdb`.`SP_GET_SLEEPY_CELL_DATA_SPDB_4G_5G_OPTIMISED` near line 127: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'WHERE FIND_IN_SET(CAST(t.MARKET_ID AS CHAR), IN_MARKET_CSV) > 0
+
 No Java change is required.
