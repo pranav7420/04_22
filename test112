@@ -1,207 +1,113 @@
-Good question — this is where subtle SQL choices matter.
+Make changes only in the **market** and **geofence** flow WHERE clauses.
+
+Your event flow can stay optimized/dynamic.
 
 ---
 
-# 🔍 Difference: `LOCATE` vs `FIND_IN_SET`
+## 1) Market flow change
 
-## 1) `LOCATE` (what you were using)
+### Replace this:
 
 ```sql
-LOCATE('value', 'string')
+WHERE LOCATE(CONCAT(',', CAST(t.MARKET_ID AS CHAR), ','), CONCAT(',', IN_MARKET_CSV, ',')) > 0
 ```
 
-👉 It is just a **substring search**
-
-Example:
+### With this:
 
 ```sql
-LOCATE('72', '072,073,074') → TRUE ❌ (WRONG match)
+WHERE FIND_IN_SET(CAST(t.MARKET_ID AS CHAR), IN_MARKET_CSV) > 0
 ```
 
-### Problem:
-
-* It does **partial matching**
-* You had to wrap with commas:
+Do this in both places:
 
 ```sql
-LOCATE(CONCAT(',', t.GNODEB, ','), CONCAT(',', IN_GEOFENCE_NODE_CSV, ','))
+FROM V_F_SLEEPY_CELL_4G_H t
 ```
 
-👉 That was a workaround to avoid partial matches
-
----
-
-## 2) `FIND_IN_SET` (what we switched to)
+and
 
 ```sql
-FIND_IN_SET(value, 'a,b,c')
-```
-
-👉 It is a **true CSV lookup**
-
-Example:
-
-```sql
-FIND_IN_SET('072', '071,072,073') → TRUE ✅
-FIND_IN_SET('72',  '071,072,073') → FALSE ✅
-```
-
-### Key behavior:
-
-* Matches **exact values only**
-* Automatically handles commas
-* No need for `CONCAT(',', ...)`
-
----
-
-# 🧠 Why your lead prefers this
-
-Your lead said:
-
-> “append WHERE market_id IN () / enodeb IN ()”
-
-👉 That means:
-
-* treat input as a **list of discrete values**
-* not as a string to pattern-match
-
-`FIND_IN_SET` behaves closest to SQL:
-
-```sql
-WHERE column IN (...)
+FROM V_F_SLEEPY_CELL_5G_H t
 ```
 
 ---
 
-# 🔥 Exact change you made
+## 2) Geofence flow change
 
-## Before (your workaround)
+### Replace this:
 
 ```sql
 WHERE LOCATE(CONCAT(',', t.GNODEB, ','), CONCAT(',', IN_GEOFENCE_NODE_CSV, ',')) > 0
 ```
 
-👉 Meaning:
-
-* “Find this substring inside that string”
-
----
-
-## After (correct approach)
+### With this:
 
 ```sql
 WHERE FIND_IN_SET(t.GNODEB, IN_GEOFENCE_NODE_CSV) > 0
 ```
 
-👉 Meaning:
-
-* “Check if GNODEB is one of the values in the list”
-
----
-
-# 🎯 What change are we really making?
-
-### ❌ Before:
-
-You were doing:
-
-> “string contains logic”
-
-### ✅ After:
-
-You are doing:
-
-> “set membership logic”
-
----
-
-# 🧠 In plain English
-
-| Old logic                                | New logic                     |
-| ---------------------------------------- | ----------------------------- |
-| “Is this text present inside that text?” | “Is this value in this list?” |
-| fragile                                  | precise                       |
-| workaround-heavy                         | clean                         |
-| harder to read                           | aligns with SQL thinking      |
-
----
-
-# 📌 Why this satisfies your lead
-
-Your lead said:
-
-> “same query, just append WHERE market_id IN () / enodeb IN ()”
-
-👉 You cannot directly use `IN (csv_string)` in MySQL/MemSQL
-
-So the **closest equivalent** is:
+Do this in both places:
 
 ```sql
-FIND_IN_SET(column, csv_string)
+FROM V_F_SLEEPY_CELL_4G_H t
 ```
 
-✔ behaves like `IN`
-✔ simple
-✔ readable
-✔ no hacks
-
----
-
-# ⚠️ One important note (performance)
-
-Both:
-
-* `LOCATE`
-* `FIND_IN_SET`
-
-👉 **do NOT use indexes**
-
-So performance is:
-
-| Function    | Index usage |
-| ----------- | ----------- |
-| LOCATE      | ❌           |
-| FIND_IN_SET | ❌           |
-
-👉 So this change is about:
-
-* correctness
-* readability
-* maintainability
-
-NOT performance
-
----
-
-# 🟢 Final takeaway
-
-### What you changed:
+and
 
 ```sql
-LOCATE(...)  →  FIND_IN_SET(...)
+FROM V_F_SLEEPY_CELL_5G_H t
 ```
-
-### What it means:
-
-* From **string matching** → **list membership**
-* Cleaner and closer to:
-
-```sql
-WHERE column IN (...)
-```
-
-### Why it's correct:
-
-* avoids partial matches
-* simpler
-* matches your lead’s design
 
 ---
 
-# 🚀 If you want next
+## Final market 4G WHERE
 
-I can show you how to:
-👉 convert this into **true indexed filtering (temp table / join)**
-👉 which gives real performance gain for large geofence lists (1000+ nodes)
+```sql
+FROM V_F_SLEEPY_CELL_4G_H t
+WHERE FIND_IN_SET(CAST(t.MARKET_ID AS CHAR), IN_MARKET_CSV) > 0
+  AND t.STARTDATE >= IN_START_DATE
+  AND t.STARTDATE < DATE_ADD(IN_END_DATE, INTERVAL 1 DAY)
+  AND t.SLEEPY_CELL_KAFKA_FLAG = 'Y'
+  AND t.SLEEPY_CELLS_FINAL_FLAG = 'Y'
+  AND (t.SEVERITY = IN_SEVERITY OR IN_SEVERITY IS NULL)
+```
 
-That would be the next real optimization step.
+## Final market 5G WHERE
+
+```sql
+FROM V_F_SLEEPY_CELL_5G_H t
+WHERE FIND_IN_SET(CAST(t.MARKET_ID AS CHAR), IN_MARKET_CSV) > 0
+  AND t.STARTDATE >= IN_START_DATE
+  AND t.STARTDATE < DATE_ADD(IN_END_DATE, INTERVAL 1 DAY)
+  AND t.SLEEPY_CELLS_FINAL_FLAG = 'Y'
+  AND (t.SEVERITY = IN_SEVERITY OR IN_SEVERITY IS NULL)
+```
+
+---
+
+## Final geofence 4G WHERE
+
+```sql
+FROM V_F_SLEEPY_CELL_4G_H t
+WHERE FIND_IN_SET(t.GNODEB, IN_GEOFENCE_NODE_CSV) > 0
+  AND t.STARTDATE >= IN_START_DATE
+  AND t.STARTDATE < DATE_ADD(IN_END_DATE, INTERVAL 1 DAY)
+  AND t.SLEEPY_CELL_KAFKA_FLAG = 'Y'
+  AND t.SLEEPY_CELLS_FINAL_FLAG = 'Y'
+  AND (t.SEVERITY = IN_SEVERITY OR IN_SEVERITY IS NULL)
+```
+
+## Final geofence 5G WHERE
+
+```sql
+FROM V_F_SLEEPY_CELL_5G_H t
+WHERE FIND_IN_SET(t.GNODEB, IN_GEOFENCE_NODE_CSV) > 0
+  AND t.STARTDATE >= IN_START_DATE
+  AND t.STARTDATE < DATE_ADD(IN_END_DATE, INTERVAL 1 DAY)
+  AND t.SLEEPY_CELLS_FINAL_FLAG = 'Y'
+  AND (t.SEVERITY = IN_SEVERITY OR IN_SEVERITY IS NULL)
+```
+
+---
+
+No Java change is required.
