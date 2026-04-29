@@ -1,1 +1,12 @@
-test
+BEGIN;
+
+UPDATE rasysadm.ra_agr_mod_exhibit_mapping
+SET exhibit_seq_id = 523,
+    last_modified_by = CURRENT_USER,
+    last_modified_ts = CURRENT_TIMESTAMP
+WHERE ra_agreement_number = 'R24110008'
+  AND agr_modification_number = 2
+  AND exhibit_seq_id = 90
+  AND exhibit_type = 'A02';
+
+COMMIT;
