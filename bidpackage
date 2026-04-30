@@ -1,0 +1,23 @@
+[4/30/26 9:16:37:692 EDT] 00000117 SystemOut     O Exception occurred while calling processBidPackageAddendumPublishing with Message: DB2 SQL Error: SQLCODE=-913, SQLSTATE=57033, SQLERRMC=00C9008E;00000304;DECMSCMS.SBPAD   .X'00000042'.X'39', DRIVER=4.21.29and cause: nullwith current time in millis: 1777554997692
+Event Actions
+ 
+Type	 	Field	Value	Actions
+Selected	 	host	PDPRSHAWAS03	 
+ 	source	E:\IBM\WebSphere\AppServer\profiles\AppSrv01\logs\ECMS_Node01\SystemOut.log	 
+ 	sourcetype	websphere	 
+Event	 	DRIVER	4.21.29and	 
+ 	ECS_Client	SystemOut	 
+ 	SQLCODE	-913	 
+ 	SQLERRMC	00C9008E	 
+ 	SQLSTATE	57033	 
+Time	_time	2026-04-30T09:16:37.692-04:00
+Default	 	index	app_websphere	 
+ 	linecount	1	 
+ 	punct	[//_:::_]______________:___:_=-,_=,_=;;.___.''.'',	 
+ 	splunk_server	PDPRSECSPK07	 
+ 
+ 
+processBidPackageAddendumPublishing
+ 
+BOBSLBatch.java
+ 
