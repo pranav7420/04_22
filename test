@@ -1,12 +1,124 @@
-BEGIN;
+The failure is **DB2 duplicate key SQLCODE=-803**.
 
-UPDATE rasysadm.ra_agr_mod_exhibit_mapping
-SET exhibit_seq_id = 523,
-    last_modified_by = CURRENT_USER,
-    last_modified_ts = CURRENT_TIMESTAMP
-WHERE ra_agreement_number = 'R24110008'
-  AND agr_modification_number = 2
-  AND exhibit_seq_id = 90
-  AND exhibit_type = 'A02';
+Root cause from code path:
 
-COMMIT;
+`SVPWO.doECMSUserTask()`
+→ `BOPWO.approve()`
+→ `BOPWO.processFinalPennDOTApproval()`
+→ `updateConstructionSpecialProvisions()`
+→ `BOPWOAuthSPP.accept()`
+→ `DBPWOAuthorizationSPP.insertConstSPP()`
+→ inserts into `CONST_SP_PROV`
+
+The failing insert is here:
+
+```java
+// DBPWOAuthorizationSPP.java
+public void insertConstSPP(DOSPP doSPP)throws Exception {
+    INSERT INTO CONST_SP_PROV (
+        ECMS_PROJECT_NUM,
+        CL_LINE_NUM,
+        SPECIAL_PROV_NUM,
+        SPECIAL_PROV_REV,
+        ...
+    )
+    VALUES (?,?,?,?,...)
+}
+```
+
+So for **Project 91768 / Work Order 027**, ECMS is trying to copy an authorization special provision into `CONST_SP_PROV`, but that same key already exists.
+
+Most likely duplicate key:
+
+```sql
+ECMS_PROJECT_NUM + CL_LINE_NUM
+```
+
+or
+
+```sql
+ECMS_PROJECT_NUM + CL_LINE_NUM + SPECIAL_PROV_NUM + SPECIAL_PROV_REV
+```
+
+depending on constraint `XCSPS1`.
+
+Run this first:
+
+```sql
+SELECT *
+FROM CONST_SP_PROV
+WHERE ECMS_PROJECT_NUM = 91768
+ORDER BY CL_LINE_NUM, SPECIAL_PROV_NUM, SPECIAL_PROV_REV;
+```
+
+Then find the SPP rows ECMS is trying to copy during WO approval:
+
+```sql
+SELECT Y.ECMS_PROJECT_NUM,
+       Y.WO_AUTH_NUM,
+       Y.CL_LINE_NUM,
+       Y.ITEM_NUMBER,
+       Y.ITEM_TYPE_CODE,
+       Y.SPECIAL_PROV_NUM,
+       Y.SPECIAL_PROV_REV
+FROM WO_ITEM X,
+     WORK_AUTH_ITEM_SP Y,
+     WO_WORK_AUTH WO,
+     WO_AUTH AUTH
+WHERE WO.ECMS_PROJECT_NUM = AUTH.ECMS_PROJECT_NUM
+  AND WO.WO_AUTH_NUM = AUTH.WO_AUTH_NUM
+  AND AUTH.WO_AUTH_STATUS_CD = '11'
+  AND WO.ECMS_PROJECT_NUM = 91768
+  AND WO.WORK_ORDER_NUM = '027'
+  AND X.ECMS_PROJECT_NUM = Y.ECMS_PROJECT_NUM
+  AND X.ITEM_NUMBER = Y.ITEM_NUMBER
+  AND X.ITEM_TYPE_CODE = Y.ITEM_TYPE_CODE
+  AND X.ECMS_PROJECT_NUM = WO.ECMS_PROJECT_NUM
+  AND X.WORK_ORDER_NUM = WO.WORK_ORDER_NUM
+  AND Y.ECMS_PROJECT_NUM = WO.ECMS_PROJECT_NUM
+  AND Y.WO_AUTH_NUM = WO.WO_AUTH_NUM
+ORDER BY Y.WO_AUTH_NUM, Y.CL_LINE_NUM;
+```
+
+Then compare against existing construction SPP:
+
+```sql
+SELECT W.ECMS_PROJECT_NUM,
+       W.WO_AUTH_NUM,
+       W.CL_LINE_NUM,
+       W.SPECIAL_PROV_NUM,
+       W.SPECIAL_PROV_REV
+FROM WORK_AUTH_SP W
+WHERE W.ECMS_PROJECT_NUM = 91768
+  AND EXISTS (
+      SELECT 1
+      FROM CONST_SP_PROV C
+      WHERE C.ECMS_PROJECT_NUM = W.ECMS_PROJECT_NUM
+        AND C.CL_LINE_NUM = W.CL_LINE_NUM
+  )
+ORDER BY W.WO_AUTH_NUM, W.CL_LINE_NUM;
+```
+
+Likely fix: this method should behave like `insertConstSPPItem()` and avoid inserting if the construction SPP already exists, or call `updateConstSPP()` when found.
+
+Minimal safe code fix idea:
+
+```java
+if (constInd != null && constInd.equalsIgnoreCase(BOPWOUtil.CONST_IND_Y)) {
+    if (deleteInd != null && deleteInd.equalsIgnoreCase(BOPWOUtil.DELETE_IND_Y)) {
+        dbSPP.deleteConstSPP(doSPP);
+    } else {
+        dbSPP.updateConstSPP(doSPP);
+        dbSPP.insertConstSPPItem(doSPP);
+    }
+} else {
+    if (dbSPP.constSPPPresent(doSPP)) {
+        dbSPP.updateConstSPP(doSPP);
+    } else {
+        dbSPP.insertConstSPP(doSPP);
+    }
+    dbSPP.insertConstSPPItem(doSPP);
+}
+```
+
+But first confirm the duplicate row using the SQL above.
